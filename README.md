@@ -151,9 +151,7 @@ access to the Go module proxy, none of this is necessary — the
 - No browser integration / clipboard URL monitoring.
 - HTTP segment count is fixed per download at creation time — it
   doesn't dynamically add connections to a slow segment.
-- Torrent "resume" re-adds the torrent and lets the library re-verify
-  pieces already on disk rather than persisting exact piece-completion
-  state — correct, but slower to resume than a native client that
-  keeps a resume file.
+- Paused torrents retain their swarm and piece state in the shared client;
+  resume reuses that retained torrent. Explicit removal drops the torrent.
 - No DHT/tracker configuration exposed (uses the library's defaults);
   no seeding-after-complete toggle.
