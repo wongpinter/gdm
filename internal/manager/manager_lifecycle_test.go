@@ -3,7 +3,26 @@ package manager
 import (
 	"context"
 	"testing"
+
+	"github.com/wongpinter/gdm/internal/domain"
 )
+
+type lifecycleStore struct{}
+
+func (lifecycleStore) Save(*domain.Download) error          { return nil }
+func (lifecycleStore) LoadAll() ([]*domain.Download, error) { return nil, nil }
+func (lifecycleStore) Delete(string) error                  { return nil }
+
+func TestFinishCanceledRunBecomesPaused(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e := &entry{dl: &domain.Download{Status: domain.StatusProbing}, runID: 1}
+	m := &Manager{entries: map[string]*entry{"id": e}, store: lifecycleStore{}}
+	m.finish("id", 1, context.Canceled, ctx)
+	if e.dl.Status != domain.StatusPaused {
+		t.Fatalf("status = %q, want paused", e.dl.Status)
+	}
+}
 
 func TestClearCancelDoesNotClobberNewRun(t *testing.T) {
 	_, oldCancel := context.WithCancel(context.Background())

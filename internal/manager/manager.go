@@ -355,8 +355,7 @@ func (m *Manager) runDownload(id string) {
 
 		res, err := m.engine.Probe(ctx, e.dl.URL)
 		if err != nil {
-			e.fail(err)
-			m.persist(id)
+			m.finish(id, runID, err, ctx)
 			e.clearCancel(runID)
 			return
 		}
