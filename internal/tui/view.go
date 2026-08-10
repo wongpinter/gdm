@@ -70,11 +70,15 @@ func (m Model) View() string {
 
 func (m Model) renderHeader() string {
 	if m.narrow() {
-		return headerStyle.Render(strings.Join([]string{
-			pad("NAME", colName),
-			pad("STATUS", colStatus),
-			pad("PROGRESS", colBar+colPct+1),
-		}, " "))
+		cols := m.narrowColumns()
+		headers := []string{pad("NAME", cols[0])}
+		if len(cols) > 1 {
+			headers = append(headers, pad("STATUS", cols[1]))
+		}
+		if len(cols) > 2 {
+			headers = append(headers, pad("PROGRESS", cols[2]))
+		}
+		return headerStyle.Render(strings.Join(headers, " "))
 	}
 	if m.compact() {
 		return headerStyle.Render(strings.Join([]string{
@@ -110,6 +114,23 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 	peers := "-"
 	if d.EffectiveKind() == domain.KindTorrent {
 		peers = fmt.Sprintf("%d", snap.Peers)
+	}
+
+	if m.narrow() {
+		columns := m.narrowColumns()
+		cols := []string{pad(truncate(name, columns[0]), columns[0])}
+		if len(columns) > 1 {
+			cols = append(cols, statusStyle(string(d.Status)).Render(pad(string(d.Status), columns[1])))
+		}
+		if len(columns) > 2 {
+			barWidth := max(columns[2]-colPct-1, 4)
+			cols = append(cols, renderBar(d.Status, progress, barWidth)+" "+pad(fmt.Sprintf("%3.0f%%", progress*100), colPct))
+		}
+		line := strings.Join(cols, " ")
+		if i == m.cursor {
+			return selectedRowStyle.Render(line)
+		}
+		return rowStyle.Render(line)
 	}
 
 	cols := []string{
@@ -183,6 +204,16 @@ func detailLine(label, value string, width int) string {
 
 func (m Model) narrow() bool {
 	return m.width > 0 && m.width < 76
+}
+
+func (m Model) narrowColumns() []int {
+	available := max(m.width, 1)
+	progressWidth := colBar + colPct + 1
+	if available < 1+colStatus+progressWidth+2 {
+		return []int{available}
+	}
+	nameWidth := min(colName, available-colStatus-progressWidth-2)
+	return []int{nameWidth, colStatus, progressWidth}
 }
 
 func (m Model) compact() bool {
