@@ -192,21 +192,18 @@ func (e *Engine) Remove(id string) {
 // new one. The returned torrent is guaranteed non-nil if err is nil.
 func (e *Engine) getOrAdd(id, uri string) (*torrent.Torrent, error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.torrents == nil {
 		e.torrents = make(map[string]*torrent.Torrent)
 	}
-	t, exists := e.torrents[id]
-	e.mu.Unlock()
-	if exists {
+	if t, ok := e.torrents[id]; ok {
 		return t, nil
 	}
 	t, err := e.addTorrent(uri)
 	if err != nil {
 		return nil, err
 	}
-	e.mu.Lock()
 	e.torrents[id] = t
-	e.mu.Unlock()
 	return t, nil
 }
 

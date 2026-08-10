@@ -33,6 +33,8 @@ type entry struct {
 	mu     sync.Mutex
 	dl     *domain.Download
 	cancel context.CancelFunc
+	runSeq uint64
+	runID  uint64
 
 	lastSample time.Time
 	lastBytes  int64
@@ -340,6 +342,9 @@ func (m *Manager) runDownload(id string) {
 
 	ctx, cancel := context.WithCancel(m.ctx)
 	e.mu.Lock()
+	e.runSeq++
+	runID := e.runSeq
+	e.runID = runID
 	e.cancel = cancel
 	needsProbe := len(e.dl.Segments) == 0
 	e.mu.Unlock()
@@ -352,7 +357,7 @@ func (m *Manager) runDownload(id string) {
 		if err != nil {
 			e.fail(err)
 			m.persist(id)
-			e.clearCancel()
+			e.clearCancel(runID)
 			return
 		}
 
@@ -395,8 +400,8 @@ func (m *Manager) runDownload(id string) {
 			m.persist(id)
 		case err := <-done:
 			drainEvents(events, e)
-			m.finish(id, err, ctx)
-			e.clearCancel()
+			m.finish(id, runID, err, ctx)
+			e.clearCancel(runID)
 			return
 		}
 	}
@@ -431,6 +436,9 @@ func (m *Manager) runTorrentDownload(id string) {
 
 	ctx, cancel := context.WithCancel(m.ctx)
 	e.mu.Lock()
+	e.runSeq++
+	runID := e.runSeq
+	e.runID = runID
 	e.cancel = cancel
 	e.mu.Unlock()
 
@@ -459,8 +467,8 @@ func (m *Manager) runTorrentDownload(id string) {
 			m.persist(id)
 		case err := <-done:
 			drainTorrentStats(stats, m, e)
-			m.finish(id, err, ctx)
-			e.clearCancel()
+			m.finish(id, runID, err, ctx)
+			e.clearCancel(runID)
 			return
 		}
 	}
@@ -497,12 +505,16 @@ func (m *Manager) applyTorrentStats(e *entry, st TorrentStats) {
 	e.dl.UpdatedAt = time.Now()
 }
 
-func (m *Manager) finish(id string, runErr error, ctx context.Context) {
+func (m *Manager) finish(id string, runID uint64, runErr error, ctx context.Context) {
 	e := m.getEntry(id)
 	if e == nil {
 		return
 	}
 	e.mu.Lock()
+	if e.runID != runID {
+		e.mu.Unlock()
+		return
+	}
 	switch {
 	case runErr == nil:
 		e.dl.Status = domain.StatusCompleted
@@ -547,9 +559,11 @@ func (e *entry) fail(err error) {
 	e.mu.Unlock()
 }
 
-func (e *entry) clearCancel() {
+func (e *entry) clearCancel(runID uint64) {
 	e.mu.Lock()
-	e.cancel = nil
+	if e.runID == runID {
+		e.cancel = nil
+	}
 	e.mu.Unlock()
 }
 
