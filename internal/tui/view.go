@@ -201,18 +201,26 @@ func (m Model) selectedName() string {
 }
 
 func pad(s string, width int) string {
-	if len(s) >= width {
-		return s[:width]
+	if width <= 0 {
+		return ""
 	}
-	return s + strings.Repeat(" ", width-len(s))
+	runes := []rune(s)
+	if len(runes) >= width {
+		return string(runes[:width])
+	}
+	return s + strings.Repeat(" ", width-len(runes))
 }
 
 func truncate(s string, width int) string {
-	if len(s) <= width {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
 		return s
 	}
-	if width <= 1 {
-		return s[:width]
+	if width == 1 {
+		return string(runes[:1])
 	}
-	return s[:width-1] + "…"
+	return string(runes[:width-1]) + "…"
 }
