@@ -93,7 +93,7 @@ engines: a torrent is represented as one pseudo-`Segment` spanning the
 whole transfer (`{Start:0, End:TotalSize-1, Downloaded:BytesCompleted}`),
 so `Download.BytesDownloaded()`/`Progress()` work unchanged for both —
 the manager runs a `runTorrentDownload` loop parallel to `runDownload`,
-polling `TorrentEngine.Run`'s periodic stats instead of aggregating
+consuming periodic `TorrentStats` snapshots from `TorrentEngine.Start` instead of aggregating
 per-chunk `ProgressEvent`s, but everything downstream (persistence, the
 TUI, pause/resume semantics) is the same code path.
 
