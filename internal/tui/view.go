@@ -44,12 +44,17 @@ func (m Model) View() string {
 		b.WriteString(helpStyle.Render("  No downloads yet — press 'a' to add one."))
 		b.WriteString("\n")
 	}
-	for i, snap := range m.rows {
-		b.WriteString(m.renderRow(i, snap))
+	start, end := m.visibleRows()
+	for i := start; i < end; i++ {
+		b.WriteString(m.renderRow(i, m.rows[i]))
+		b.WriteString("\n")
+	}
+	if end < len(m.rows) {
+		b.WriteString(helpStyle.Render(fmt.Sprintf("  showing %d-%d of %d", start+1, end, len(m.rows))))
 		b.WriteString("\n")
 	}
 
-	if detail := m.renderSelectedDetail(); detail != "" {
+	if detail := m.renderSelectedDetail(); detail != "" && m.detailVisible() {
 		b.WriteString("\n")
 		b.WriteString(detail)
 		b.WriteString("\n")
@@ -196,6 +201,31 @@ func (m Model) detailWidth() int {
 		return 80
 	}
 	return max(m.width-16, 12)
+}
+
+func (m Model) visibleRows() (int, int) {
+	if len(m.rows) == 0 {
+		return 0, 0
+	}
+	start := 0
+	if m.height > 0 {
+		available := m.height - 9
+		if available < 1 {
+			available = 1
+		}
+		if m.cursor >= available {
+			start = m.cursor - available + 1
+		}
+	}
+	end := len(m.rows)
+	if m.height > 0 && end > start+max(m.height-9, 1) {
+		end = start + max(m.height-9, 1)
+	}
+	return start, end
+}
+
+func (m Model) detailVisible() bool {
+	return m.height <= 0 || m.height >= 14
 }
 
 func detailLine(label, value string, width int) string {

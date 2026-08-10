@@ -1,6 +1,18 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/wongpinter/gdm/internal/manager"
+)
+
+func TestVisibleRowsScrollsToCursor(t *testing.T) {
+	m := Model{height: 12, cursor: 5, rows: make([]manager.Snapshot, 10)}
+	start, end := m.visibleRows()
+	if start != 3 || end != 6 {
+		t.Fatalf("visible rows = (%d, %d), want (3, 6)", start, end)
+	}
+}
 
 func TestNarrowColumnsFitTerminal(t *testing.T) {
 	for width := 1; width < 76; width++ {
