@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/wongpinter/gdm/internal/domain"
 	"github.com/wongpinter/gdm/internal/manager"
@@ -20,6 +21,9 @@ const (
 )
 
 func (m Model) View() string {
+	if m.mode == modeHelp {
+		return m.renderHelp()
+	}
 	var b strings.Builder
 
 	b.WriteString(titleStyle.Render("gdm — Go Download Manager"))
@@ -28,7 +32,12 @@ func (m Model) View() string {
 	b.WriteString("\n\n")
 
 	if m.mode == modeAdd {
-		b.WriteString(inputBoxStyle.Render(m.input.View()))
+		b.WriteString(inputBoxStyle.Render(strings.Join([]string{
+			"ADD DOWNLOAD",
+			m.input.View(),
+			m.scheduleInput.View(),
+			"Tab next field · Enter add · Esc cancel",
+		}, "\n")))
 		b.WriteString("\n\n")
 	}
 
@@ -69,7 +78,7 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpStyle.Render("a add · p pause · r resume · x remove · ↑/↓ select · q quit"))
+	b.WriteString(helpStyle.Render("a add · p pause · r resume · x remove · ↑/↓ select · ? help · q quit"))
 	return b.String()
 }
 
@@ -116,6 +125,10 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 	}
 	progress := d.Progress()
 	remaining := d.TotalSize - d.BytesDownloaded()
+	status := string(d.Status)
+	if d.Status == domain.StatusQueued && !d.StartAt.IsZero() && time.Now().Before(d.StartAt) {
+		status = "scheduled"
+	}
 	peers := "-"
 	if d.EffectiveKind() == domain.KindTorrent {
 		peers = fmt.Sprintf("%d", snap.Peers)
@@ -125,7 +138,7 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 		columns := m.narrowColumns()
 		cols := []string{pad(truncate(name, columns[0]), columns[0])}
 		if len(columns) > 1 {
-			cols = append(cols, statusStyle(string(d.Status)).Render(pad(string(d.Status), columns[1])))
+			cols = append(cols, statusStyle(status).Render(pad(status, columns[1])))
 		}
 		if len(columns) > 2 {
 			barWidth := max(columns[2]-colPct-1, 4)
@@ -140,7 +153,7 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 
 	cols := []string{
 		pad(truncate(name, colName), colName),
-		statusStyle(string(d.Status)).Render(pad(string(d.Status), colStatus)),
+		statusStyle(status).Render(pad(status, colStatus)),
 		renderBar(d.Status, progress, colBar) + " " + pad(fmt.Sprintf("%3.0f%%", progress*100), colPct),
 	}
 	if !m.narrow() {
@@ -159,6 +172,19 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 		return selectedRowStyle.Render(line)
 	}
 	return rowStyle.Render(line)
+}
+
+func (m Model) renderHelp() string {
+	return detailStyle.Render(strings.Join([]string{
+		titleStyle.Render("GDM HELP"),
+		"↑/↓ or j/k   select download",
+		"a             add download",
+		"p / r         pause / resume",
+		"x             remove and delete file",
+		"Enter         confirm or open action",
+		"Esc or ?      close this help",
+		"q             quit",
+	}, "\n"))
 }
 
 func (m Model) renderSummary() string {
@@ -189,6 +215,9 @@ func (m Model) renderSelectedDetail() string {
 		detailLine("URL", d.URL, m.detailWidth()),
 		detailLine("DESTINATION", d.Dest, m.detailWidth()),
 		detailLine("STATUS", string(d.Status), m.detailWidth()),
+	}
+	if !d.StartAt.IsZero() && d.Status == domain.StatusQueued {
+		lines = append(lines, detailLine("STARTS", d.StartAt.Local().Format("2006-01-02 15:04"), m.detailWidth()))
 	}
 	if d.Error != "" {
 		lines = append(lines, detailLine("ERROR", d.Error, m.detailWidth()))

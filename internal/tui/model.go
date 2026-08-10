@@ -20,6 +20,7 @@ const (
 	modeList mode = iota
 	modeAdd
 	modeConfirmRemove
+	modeHelp
 )
 
 // Model is bubbletea's immutable-per-frame state. Mutating methods on
@@ -31,7 +32,9 @@ type Model struct {
 	cursor int
 	mode   mode
 
-	input textinput.Model
+	input         textinput.Model
+	scheduleInput textinput.Model
+	addField      int
 
 	statusMsg string
 	errMsg    string
@@ -45,11 +48,15 @@ func New(mgr *manager.Manager) Model {
 	ti.Placeholder = "https://example.com/file.zip or magnet:?xt=..."
 	ti.CharLimit = 2048
 	ti.Prompt = "URL › "
+	si := textinput.New()
+	si.Placeholder = "blank = now; RFC3339 e.g. 2026-08-10T22:30:00Z"
+	si.Prompt = "Start › "
 
 	return Model{
-		mgr:   mgr,
-		input: ti,
-		rows:  mgr.List(),
+		mgr:           mgr,
+		input:         ti,
+		scheduleInput: si,
+		rows:          mgr.List(),
 	}
 }
 

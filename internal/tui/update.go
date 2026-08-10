@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -50,6 +51,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleAddKey(msg)
 	case modeConfirmRemove:
 		return m.handleConfirmKey(msg)
+	case modeHelp:
+		if msg.String() == "?" || msg.Type == tea.KeyEsc {
+			m.mode = modeList
+		}
+		return m, nil
 	default:
 		return m.handleListKey(msg)
 	}
@@ -76,8 +82,15 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeAdd
 		m.errMsg = ""
 		m.statusMsg = ""
+		m.addField = 0
 		m.input.SetValue("")
+		m.scheduleInput.SetValue("")
 		m.input.Focus()
+		m.scheduleInput.Blur()
+		return m, nil
+
+	case "?":
+		m.mode = modeHelp
 		return m, nil
 
 	case "p":
@@ -103,32 +116,59 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleAddKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyEsc:
+	if msg.Type == tea.KeyEsc {
 		m.mode = modeList
 		m.input.Blur()
+		m.scheduleInput.Blur()
 		return m, nil
-
-	case tea.KeyEnter:
-		src := m.input.Value()
-		m.mode = modeList
-		m.input.Blur()
-		if src == "" {
+	}
+	if msg.Type == tea.KeyTab {
+		m.addField = 1 - m.addField
+		if m.addField == 0 {
+			m.input.Focus()
+			m.scheduleInput.Blur()
 			return m, nil
 		}
+		m.input.Blur()
+		m.scheduleInput.Focus()
+		return m, nil
+	}
+	if msg.Type == tea.KeyEnter {
+		src := strings.TrimSpace(m.input.Value())
+		startText := strings.TrimSpace(m.scheduleInput.Value())
+		if src == "" {
+			m.errMsg = "add: source is empty"
+			return m, nil
+		}
+		var startAt time.Time
+		if startText != "" {
+			parsed, err := time.Parse(time.RFC3339, startText)
+			if err != nil {
+				m.errMsg = "add: start must be RFC3339 (or blank for now)"
+				return m, nil
+			}
+			startAt = parsed
+		}
+		m.mode = modeList
+		m.input.Blur()
+		m.scheduleInput.Blur()
 		if isTorrentSource(src) {
 			return m, m.dispatch("added", func() error {
-				_, err := m.mgr.AddTorrent(src)
+				_, err := m.mgr.AddTorrentAt(src, startAt)
 				return err
 			})
 		}
 		return m, m.dispatch("added", func() error {
-			_, err := m.mgr.Add(src, 0)
+			_, err := m.mgr.AddAt(src, 0, startAt)
 			return err
 		})
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	if m.addField == 0 {
+		m.input, cmd = m.input.Update(msg)
+	} else {
+		m.scheduleInput, cmd = m.scheduleInput.Update(msg)
+	}
 	return m, cmd
 }
 

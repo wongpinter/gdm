@@ -6,6 +6,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func TestHandleListKeyOpensAndClosesHelp(t *testing.T) {
+	m := Model{}
+	got, cmd := m.handleListKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	if cmd != nil || got.(Model).mode != modeHelp {
+		t.Fatal("? did not open help")
+	}
+	got, cmd = got.(Model).handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil || got.(Model).mode != modeList {
+		t.Fatal("Esc did not close help")
+	}
+}
+
 func TestHandleListKeyIgnoresPauseResumeWithoutSelection(t *testing.T) {
 	m := Model{}
 	for _, key := range []string{"p", "r"} {
