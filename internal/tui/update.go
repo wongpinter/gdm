@@ -81,9 +81,15 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "p":
+		if m.selectedID() == "" {
+			return m, nil
+		}
 		return m, m.dispatch("paused", func() error { return m.mgr.Pause(m.selectedID()) })
 
 	case "r":
+		if m.selectedID() == "" {
+			return m, nil
+		}
 		return m, m.dispatch("resumed", func() error { return m.mgr.Resume(m.selectedID()) })
 
 	case "x":
