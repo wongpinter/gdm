@@ -121,6 +121,12 @@ func (m *Manager) SetTorrentEngine(te TorrentEngine) {
 // Add registers a new HTTP download and schedules it for probing.
 // connections <= 0 falls back to the manager's default.
 func (m *Manager) Add(rawURL string, connections int) (*domain.Download, error) {
+	return m.AddAt(rawURL, connections, time.Time{})
+}
+
+// AddAt registers an HTTP download and waits until startAt before probing.
+// A zero startAt starts immediately; a past startAt also starts immediately.
+func (m *Manager) AddAt(rawURL string, connections int, startAt time.Time) (*domain.Download, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil, errors.New("URL is empty")
@@ -129,14 +135,16 @@ func (m *Manager) Add(rawURL string, connections int) (*domain.Download, error) 
 		connections = m.maxConns
 	}
 
+	now := time.Now()
 	dl := &domain.Download{
 		ID:          newID(),
 		URL:         rawURL,
 		Kind:        domain.KindHTTP,
 		Connections: connections,
 		Status:      domain.StatusQueued,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		StartAt:     startAt,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	return m.add(dl)
 }
@@ -144,17 +152,25 @@ func (m *Manager) Add(rawURL string, connections int) (*domain.Download, error) 
 // AddTorrent registers a new torrent download from a magnet URI or a
 // path to a local .torrent file.
 func (m *Manager) AddTorrent(uri string) (*domain.Download, error) {
+	return m.AddTorrentAt(uri, time.Time{})
+}
+
+// AddTorrentAt registers a torrent and waits until startAt before joining.
+// A zero startAt starts immediately; a past startAt also starts immediately.
+func (m *Manager) AddTorrentAt(uri string, startAt time.Time) (*domain.Download, error) {
 	uri = strings.TrimSpace(uri)
 	if uri == "" {
 		return nil, errors.New("magnet URI or .torrent path is empty")
 	}
+	now := time.Now()
 	dl := &domain.Download{
 		ID:        newID(),
 		URL:       uri,
 		Kind:      domain.KindTorrent,
 		Status:    domain.StatusQueued,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		StartAt:   startAt,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	return m.add(dl)
 }
@@ -312,6 +328,20 @@ func (m *Manager) enqueue(id string) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		if e := m.getEntry(id); e != nil {
+			e.mu.Lock()
+			startAt := e.dl.StartAt
+			e.mu.Unlock()
+			if !startAt.IsZero() && time.Until(startAt) > 0 {
+				timer := time.NewTimer(time.Until(startAt))
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-m.ctx.Done():
+					return
+				}
+			}
+		}
 		select {
 		case m.sem <- struct{}{}:
 		case <-m.ctx.Done():

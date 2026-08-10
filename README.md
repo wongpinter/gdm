@@ -146,8 +146,8 @@ access to the Go module proxy, none of this is necessary — the
 
 ## Known limitations
 
-- No bandwidth throttling or scheduling (GDM's "download later" queue
-  scheduling isn't implemented).
+- No bandwidth throttling or recurring time-window scheduling; one-time
+  "download later" scheduling is available through the manager API.
 - No browser integration / clipboard URL monitoring.
 - HTTP segment count is fixed per download at creation time — it
   doesn't dynamically add connections to a slow segment.

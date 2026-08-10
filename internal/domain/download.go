@@ -68,6 +68,7 @@ type Download struct {
 	Connections   int       `json:"connections"`
 	Segments      []Segment `json:"segments"`
 	Status        Status    `json:"status"`
+	StartAt       time.Time `json:"start_at,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`

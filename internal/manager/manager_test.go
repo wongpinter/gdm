@@ -85,6 +85,26 @@ func waitForProgress(t *testing.T, mgr *manager.Manager, id string) {
 	t.Fatal("timed out waiting for download progress")
 }
 
+func TestScheduledDownloadWaitsUntilStart(t *testing.T) {
+	data := []byte("scheduled download")
+	srv := newRangeServer(t, data, 0)
+	defer srv.Close()
+
+	mgr := newTestManager(t, engine.New())
+	startAt := time.Now().Add(300 * time.Millisecond)
+	dl, err := mgr.AddAt(srv.URL+"/testfile.bin", 1, startAt)
+	if err != nil {
+		t.Fatalf("AddAt: %v", err)
+	}
+	time.Sleep(75 * time.Millisecond)
+	if snap, ok := mgr.Get(dl.ID); !ok || snap.Download.Status != "queued" {
+		t.Fatalf("status before StartAt = %v, want queued", snap.Download.Status)
+	}
+	if snap := waitForStatus(t, mgr, dl.ID, "completed", "failed"); snap.Download.Status != "completed" {
+		t.Fatalf("download ended in status %q, error: %s", snap.Download.Status, snap.Download.Error)
+	}
+}
+
 func TestFullDownload(t *testing.T) {
 	data := make([]byte, 500_000)
 	if _, err := rand.Read(data); err != nil {
