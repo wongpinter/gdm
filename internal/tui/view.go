@@ -46,9 +46,38 @@ func (m Model) View() string {
 		b.WriteString("\n\n")
 	}
 
+	if m.split() {
+		b.WriteString(m.renderSplitDashboard())
+	} else {
+		b.WriteString(m.renderQueue())
+		if detail := m.renderSelectedDetail(); detail != "" && m.detailVisible() {
+			b.WriteString("\n")
+			b.WriteString(detail)
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	if m.errMsg != "" {
+		b.WriteString(errStyle.Render(m.errMsg))
+		b.WriteString("\n")
+	} else if m.statusMsg != "" {
+		b.WriteString(helpStyle.Render(m.statusMsg))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(helpStyle.Render("a add · p pause · r resume · x remove · ↑/↓ select · ? help · q quit"))
+	return b.String()
+}
+
+func (m Model) split() bool { return m.width >= 120 && m.height >= 14 }
+
+func (m Model) renderQueue() string {
+	var b strings.Builder
+	b.WriteString(detailLabelStyle.Render("QUEUE"))
+	b.WriteString("\n")
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
-
 	if len(m.rows) == 0 {
 		b.WriteString(helpStyle.Render("  No downloads yet — press 'a' to add one."))
 		b.WriteString("\n")
@@ -62,23 +91,37 @@ func (m Model) View() string {
 		b.WriteString(helpStyle.Render(fmt.Sprintf("  showing %d-%d of %d", start+1, end, len(m.rows))))
 		b.WriteString("\n")
 	}
+	return b.String()
+}
 
-	if detail := m.renderSelectedDetail(); detail != "" && m.detailVisible() {
-		b.WriteString("\n")
-		b.WriteString(detail)
-		b.WriteString("\n")
+func (m Model) renderSplitDashboard() string {
+	left := m.renderQueue()
+	right := m.renderSelectedDetail()
+	if right == "" {
+		right = detailStyle.Render("SELECTED\nNo download selected")
 	}
-
+	leftLines := strings.Split(left, "\n")
+	rightLines := strings.Split(right, "\n")
+	rows := max(len(leftLines), len(rightLines))
+	leftWidth := max(m.width/2-3, 20)
+	var b strings.Builder
+	b.WriteString(detailLabelStyle.Render("QUEUE"))
+	b.WriteString(strings.Repeat(" ", max(leftWidth-5, 1)))
+	b.WriteString(detailLabelStyle.Render("SELECTED"))
 	b.WriteString("\n")
-	if m.errMsg != "" {
-		b.WriteString(errStyle.Render(m.errMsg))
-		b.WriteString("\n")
-	} else if m.statusMsg != "" {
-		b.WriteString(helpStyle.Render(m.statusMsg))
+	for i := 0; i < rows; i++ {
+		l, r := "", ""
+		if i < len(leftLines) {
+			l = leftLines[i]
+		}
+		if i < len(rightLines) {
+			r = rightLines[i]
+		}
+		b.WriteString(pad(truncate(l, leftWidth), leftWidth))
+		b.WriteString(" │ ")
+		b.WriteString(truncate(r, max(m.width-leftWidth-3, 12)))
 		b.WriteString("\n")
 	}
-
-	b.WriteString(helpStyle.Render("a add · p pause · r resume · x remove · ↑/↓ select · ? help · q quit"))
 	return b.String()
 }
 
@@ -116,12 +159,18 @@ func (m Model) renderHeader() string {
 
 func (m Model) renderRow(i int, snap manager.Snapshot) string {
 	d := snap.Download
+	statusIcon := map[string]string{
+		"queued": "○", "probing": "…", "downloading": "●", "paused": "Ⅱ", "completed": "✓", "failed": "!",
+	}[string(d.Status)]
 	name := d.Filename
 	if name == "" {
 		name = d.URL
 	}
 	if d.EffectiveKind() == domain.KindTorrent {
-		name = "\u21bb " + name // ⇃ swarm marker, distinguishes torrents at a glance
+		name = "↻ " + name
+	}
+	if statusIcon != "" {
+		name = statusIcon + " " + name
 	}
 	progress := d.Progress()
 	remaining := d.TotalSize - d.BytesDownloaded()
@@ -188,20 +237,28 @@ func (m Model) renderHelp() string {
 }
 
 func (m Model) renderSummary() string {
-	active, completed := 0, 0
+	active, queued, scheduled, completed, failed := 0, 0, 0, 0, 0
 	var aggregateSpeed float64
 	for _, snap := range m.rows {
 		aggregateSpeed += snap.SpeedBps
 		switch snap.Download.Status {
-		case domain.StatusQueued, domain.StatusProbing, domain.StatusDownloading:
+		case domain.StatusProbing, domain.StatusDownloading:
 			active++
+		case domain.StatusQueued:
+			if !snap.Download.StartAt.IsZero() && time.Now().Before(snap.Download.StartAt) {
+				scheduled++
+			} else {
+				queued++
+			}
 		case domain.StatusCompleted:
 			completed++
+		case domain.StatusFailed:
+			failed++
 		}
 	}
 	return summaryStyle.Render(fmt.Sprintf(
-		"%d total · %d active · %d completed · %s aggregate",
-		len(m.rows), active, completed, formatSpeed(aggregateSpeed),
+		"%d total · %d active · %d queued · %d scheduled · %d done · %d failed · %s aggregate",
+		len(m.rows), active, queued, scheduled, completed, failed, formatSpeed(aggregateSpeed),
 	))
 }
 
