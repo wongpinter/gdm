@@ -13,6 +13,21 @@ func (lifecycleStore) Save(*domain.Download) error          { return nil }
 func (lifecycleStore) LoadAll() ([]*domain.Download, error) { return nil, nil }
 func (lifecycleStore) Delete(string) error                  { return nil }
 
+type failingLifecycleStore struct{ lifecycleStore }
+
+func (failingLifecycleStore) Save(*domain.Download) error { return context.DeadlineExceeded }
+
+func TestAddRemovesEntryWhenInitialSaveFails(t *testing.T) {
+	m := &Manager{entries: make(map[string]*entry), store: failingLifecycleStore{}}
+	dl := &domain.Download{ID: "id", Status: domain.StatusQueued}
+	if _, err := m.add(dl); err == nil {
+		t.Fatal("add succeeded with failing store")
+	}
+	if _, ok := m.Get(dl.ID); ok {
+		t.Fatal("failed add left entry in manager")
+	}
+}
+
 func TestFinishCanceledRunBecomesPaused(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

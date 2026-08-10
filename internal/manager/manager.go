@@ -166,6 +166,10 @@ func (m *Manager) add(dl *domain.Download) (*domain.Download, error) {
 	m.mu.Unlock()
 
 	if err := m.store.Save(dl); err != nil {
+		m.mu.Lock()
+		delete(m.entries, dl.ID)
+		m.order = slices.DeleteFunc(m.order, func(x string) bool { return x == dl.ID })
+		m.mu.Unlock()
 		return nil, err
 	}
 	// Clone before enqueueing — the worker goroutine starts mutating
