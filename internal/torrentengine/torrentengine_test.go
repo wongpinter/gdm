@@ -73,6 +73,19 @@ func TestFallbackTrackersIncludeHTTPS(t *testing.T) {
 	}
 }
 
+func TestShouldAddFallbackRespectsPrivateFlag(t *testing.T) {
+	if shouldAddFallback(nil) {
+		t.Fatal("nil metadata must never receive fallback trackers")
+	}
+	if !shouldAddFallback(&metainfo.Info{}) {
+		t.Fatal("public torrent should receive fallback trackers")
+	}
+	private := true
+	if shouldAddFallback(&metainfo.Info{Private: &private}) {
+		t.Fatal("private torrent must never receive fallback trackers")
+	}
+}
+
 func TestEndToEndDownload(t *testing.T) {
 	seedDir := t.TempDir()
 	_, mi, infoHash := buildTorrent(t, seedDir, "seed.bin", 300_000)
@@ -111,6 +124,8 @@ func TestEndToEndDownload(t *testing.T) {
 	}
 	defer leechClient.Close()
 	eng := &Engine{client: leechClient}
+	metaDir := t.TempDir()
+	eng.SetMetainfoCache(metaDir)
 
 	dl := &domain.Download{URL: torrentPath, Kind: domain.KindTorrent}
 	stats := make(chan manager.TorrentStats, 16)
@@ -154,6 +169,10 @@ func TestEndToEndDownload(t *testing.T) {
 downloaded:
 	if maxBytesRead == 0 {
 		t.Fatal("torrent stats never reported useful network bytes")
+	}
+	cached := filepath.Join(metaDir, strings.ToLower(infoHash.HexString())+".torrent")
+	if st, err := os.Stat(cached); err != nil || st.Size() == 0 {
+		t.Fatalf("metainfo cache missing after download: %v", err)
 	}
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run returned an error after completion: %v", err)

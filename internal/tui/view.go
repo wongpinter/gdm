@@ -178,6 +178,16 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 	if d.Status == domain.StatusQueued && !d.StartAt.IsZero() && time.Now().Before(d.StartAt) {
 		status = "scheduled"
 	}
+	if d.EffectiveKind() == domain.KindTorrent && d.Active() {
+		switch {
+		case snap.TorrentStage == manager.StageMetadata:
+			status = "metadata"
+		case snap.TorrentStalled && snap.Peers == 0:
+			status = "searching"
+		case snap.TorrentStalled:
+			status = "stalled"
+		}
+	}
 	peers := "-"
 	if d.EffectiveKind() == domain.KindTorrent {
 		peers = fmt.Sprintf("%d", snap.Peers)

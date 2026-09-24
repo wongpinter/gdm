@@ -13,17 +13,23 @@ import (
 	"time"
 
 	"github.com/wongpinter/gdm/internal/domain"
+	"github.com/wongpinter/gdm/internal/magnet"
 )
 
 // ErrNotFound is returned by any operation on an unknown download ID.
 var ErrNotFound = errors.New("download not found")
 
 // Snapshot pairs a point-in-time copy of a Download with runtime-only
-// data (speed, peers) that doesn't belong in the persisted domain entity.
+// data (speed, peers, torrent stage) that doesn't belong in the
+// persisted domain entity.
 type Snapshot struct {
 	Download *domain.Download
 	SpeedBps float64
 	Peers    int
+	// TorrentStage/TorrentStalled mirror the engine's phase for
+	// KindTorrent; empty/false for HTTP downloads.
+	TorrentStage   string
+	TorrentStalled bool
 }
 
 // entry is the manager's private, mutable record for one download.
@@ -45,6 +51,10 @@ type entry struct {
 	speedBytes int64
 	speed      float64
 	peers      int
+	// torrentStage/torrentStalled mirror the latest TorrentStats phase;
+	// surfaced via Snapshot for TUI/CLI display.
+	torrentStage   string
+	torrentStalled bool
 }
 
 // Manager is the application service at the center of the hexagon: it
@@ -162,22 +172,63 @@ func (m *Manager) AddTorrent(uri string) (*domain.Download, error) {
 
 // AddTorrentAt registers a torrent and waits until startAt before joining.
 // A zero startAt starts immediately; a past startAt also starts immediately.
+// A URI matching a known torrent by exact URL or info hash returns the
+// existing download (resumed when terminal) instead of queueing a
+// duplicate — tracker lists and display names don't change identity.
 func (m *Manager) AddTorrentAt(uri string, startAt time.Time) (*domain.Download, error) {
 	uri = strings.TrimSpace(uri)
 	if uri == "" {
 		return nil, errors.New("magnet URI or .torrent path is empty")
+	}
+	ih, _ := magnet.InfoHashOf(uri)
+	if e := m.findTorrent(uri, ih); e != nil {
+		e.mu.Lock()
+		status := e.dl.Status
+		id := e.dl.ID
+		e.mu.Unlock()
+		switch status {
+		case domain.StatusFailed, domain.StatusCanceled, domain.StatusPaused:
+			if err := m.Resume(id); err != nil {
+				return nil, err
+			}
+		}
+		if snap, ok := m.Get(id); ok {
+			return snap.Download, nil
+		}
 	}
 	now := time.Now()
 	dl := &domain.Download{
 		ID:        newID(),
 		URL:       uri,
 		Kind:      domain.KindTorrent,
+		InfoHash:  ih,
 		Status:    domain.StatusQueued,
 		StartAt:   startAt,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	return m.add(dl)
+}
+
+// findTorrent returns the entry for a known torrent matching uri
+// exactly or sharing a non-empty info hash. Callers must not hold m.mu.
+func (m *Manager) findTorrent(uri, ih string) *entry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, id := range m.order {
+		e, ok := m.entries[id]
+		if !ok {
+			continue
+		}
+		e.mu.Lock()
+		match := e.dl.EffectiveKind() == domain.KindTorrent &&
+			(e.dl.URL == uri || (ih != "" && e.dl.InfoHash == ih))
+		e.mu.Unlock()
+		if match {
+			return e
+		}
+	}
+	return nil
 }
 
 func (m *Manager) add(dl *domain.Download) (*domain.Download, error) {
@@ -318,7 +369,7 @@ func (m *Manager) Get(id string) (Snapshot, bool) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Snapshot{Download: e.dl.Clone(), SpeedBps: e.speed, Peers: e.peers}, true
+	return Snapshot{Download: e.dl.Clone(), SpeedBps: e.speed, Peers: e.peers, TorrentStage: e.torrentStage, TorrentStalled: e.torrentStalled}, true
 }
 
 // List returns every known download in the order it was added.
@@ -620,6 +671,8 @@ func (m *Manager) applyTorrentStats(e *entry, st TorrentStats) {
 	}
 	e.speedBytes = st.BytesRead
 	e.peers = st.Peers
+	e.torrentStage = st.Stage
+	e.torrentStalled = st.Stalled
 	e.dl.UpdatedAt = time.Now()
 }
 

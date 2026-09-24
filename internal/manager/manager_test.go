@@ -105,6 +105,31 @@ func TestScheduledDownloadWaitsUntilStart(t *testing.T) {
 	}
 }
 
+// TestAddTorrentDedupesByInfoHash pins that the same payload under a
+// different tracker list or display name returns the existing download
+// instead of queueing a duplicate.
+func TestAddTorrentDedupesByInfoHash(t *testing.T) {
+	mgr := newTestManager(t, engine.New())
+	ih := "774253cc2983a7479a3d5b2ff91386027a006ebd"
+	first, err := mgr.AddTorrent("magnet:?xt=urn:btih:" + ih + "&dn=First&tr=udp://one.example:1337/announce")
+	if err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	if first.InfoHash != ih {
+		t.Fatalf("InfoHash = %q, want %q", first.InfoHash, ih)
+	}
+	second, err := mgr.AddTorrent("magnet:?xt=urn:btih:" + ih + "&dn=Second&tr=udp://two.example:6969/announce")
+	if err != nil {
+		t.Fatalf("AddTorrent: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second add got new ID %q, want existing %q", second.ID, first.ID)
+	}
+	if got := len(mgr.List()); got != 1 {
+		t.Fatalf("List has %d downloads, want 1", got)
+	}
+}
+
 func TestFullDownload(t *testing.T) {
 	data := make([]byte, 500_000)
 	if _, err := rand.Read(data); err != nil {

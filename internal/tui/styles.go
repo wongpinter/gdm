@@ -58,8 +58,10 @@ func statusStyle(status string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorWarn)
 	case "failed":
 		return lipgloss.NewStyle().Foreground(colorBad).Bold(true)
-	case "queued", "probing", "scheduled":
+	case "queued", "probing", "scheduled", "metadata", "searching":
 		return lipgloss.NewStyle().Foreground(colorMuted)
+	case "stalled":
+		return lipgloss.NewStyle().Foreground(colorWarn)
 	default:
 		return rowStyle
 	}

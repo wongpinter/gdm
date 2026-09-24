@@ -46,6 +46,14 @@ type ProbeResult struct {
 	SupportsRange bool
 }
 
+// Torrent download stages reported via TorrentStats.Stage.
+const (
+	// StageMetadata: fetching torrent info; no pieces can flow yet.
+	StageMetadata = "metadata"
+	// StageDownloading: metadata known, requesting pieces.
+	StageDownloading = "downloading"
+)
+
 // TorrentStats is a snapshot the torrent engine emits whenever a piece
 // completes or the peer count changes (at most every 750ms).
 type TorrentStats struct {
@@ -58,6 +66,14 @@ type TorrentStats struct {
 	BytesRead int64
 	Peers     int
 	Done      bool
+	// Stage is the engine-reported phase: "metadata" while fetching
+	// torrent info, "downloading" once pieces can flow. Empty for
+	// engines that don't report stages.
+	Stage string
+	// Stalled is true when no payload arrived for a prolonged stretch
+	// after metadata. Callers combine it with Peers: zero peers means
+	// "searching for peers", peers present means a stuck swarm.
+	Stalled bool
 }
 
 // TorrentEngine performs BitTorrent downloads: given a magnet URI or a

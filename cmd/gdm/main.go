@@ -16,6 +16,7 @@ import (
 
 	"github.com/wongpinter/gdm/internal/domain"
 	"github.com/wongpinter/gdm/internal/engine"
+	"github.com/wongpinter/gdm/internal/magnet"
 	"github.com/wongpinter/gdm/internal/manager"
 	"github.com/wongpinter/gdm/internal/store"
 	"github.com/wongpinter/gdm/internal/torrentengine"
@@ -41,6 +42,7 @@ func run() error {
 	maxActive := flag.Int("max-active", 3, "maximum number of downloads running at once")
 	headless := flag.Bool("headless", false, "run without TUI: print progress to stdout and wait until queued downloads finish (for Colab / CI / no-TTY)")
 	interval := flag.Duration("interval", 2*time.Second, "headless progress refresh interval (e.g. 500ms for smoother bars)")
+	publicTrackers := flag.Bool("public-trackers", false, "announce unknown info hashes to public fallback trackers during metadata fetch (rescues magnets with dead trackers; off by default for privacy)")
 	// Flags may come before or after download URLs — Go's flag package
 	// stops at the first positional, so without this `./gdm 'magnet:..'`
 	// `-dir /x` would silently queue -dir, /x, ... as download URLs.
@@ -65,6 +67,8 @@ func run() error {
 		// network sockets for it can still run HTTP downloads.
 		fmt.Fprintf(os.Stderr, "gdm: torrent support unavailable: %v\n", err)
 	} else {
+		te.SetMetainfoCache(filepath.Join(filepath.Dir(*stateDir), "torrents"))
+		te.SetAllowPublicTrackers(*publicTrackers)
 		mgr.SetTorrentEngine(te)
 		defer te.Close()
 	}
@@ -118,14 +122,20 @@ func hasTTY() bool {
 	return true
 }
 
-// reuseExisting returns the ID of an already-known download with the
-// same URL instead of queueing a duplicate. A failed/canceled/paused
-// match is resumed so a re-run retries it; an active or completed match
-// is just watched. ok=false means no match — caller should Add.
+// reuseExisting returns the ID of an already-known download matching
+// by exact URL or torrent info hash instead of queueing a duplicate.
+// A failed/canceled/paused match is resumed so a re-run retries it; an
+// active or completed match is just watched. ok=false means no match —
+// caller should Add. Manager.AddTorrentAt dedupes the same way, so this
+// is messaging plus watch-ID resolution for the CLI layer.
 func reuseExisting(mgr *manager.Manager, url string) (id string, ok bool) {
+	ih, _ := magnet.InfoHashOf(url)
 	for _, s := range mgr.List() {
 		d := s.Download
-		if d == nil || d.URL != url {
+		if d == nil {
+			continue
+		}
+		if d.URL != url && (ih == "" || d.InfoHash != ih) {
 			continue
 		}
 		switch d.Status {
@@ -242,6 +252,9 @@ func printHeadlessBlock(mgr *manager.Manager, ids []string) int {
 
 // barLine renders one download as a tqdm-style bar line:
 // [downloading] name [██████░░░░] 45.2% 1.4G/3.0G 5.2M/s ETA 10m12s peers=2
+// Torrent phases surface honestly: [metadata] while fetching info,
+// [searching] when stalled with zero peers, [stalled] when peers exist
+// but no payload arrives.
 func barLine(mgr *manager.Manager, id string) string {
 	s, ok := mgr.Get(id)
 	if !ok || s.Download == nil {
@@ -255,15 +268,29 @@ func barLine(mgr *manager.Manager, id string) string {
 	if r := []rune(name); len(r) > 50 {
 		name = string(r[:47]) + "..."
 	}
-	var prog string
-	if d.TotalSize > 0 {
-		prog = fmt.Sprintf("%s %5.1f%% %s/%s", bar(d.Progress(), 30),
-			d.Progress()*100, humanBytes(float64(d.BytesDownloaded())), humanBytes(float64(d.TotalSize)))
-	} else {
-		prog = fmt.Sprintf("%s downloaded", humanBytes(float64(d.BytesDownloaded())))
+	status := string(d.Status)
+	prog := ""
+	if d.EffectiveKind() == domain.KindTorrent {
+		switch {
+		case s.TorrentStage == manager.StageMetadata:
+			status = "metadata"
+			prog = "fetching metadata"
+		case s.TorrentStalled && s.Peers == 0:
+			status = "searching"
+		case s.TorrentStalled:
+			status = "stalled"
+		}
+	}
+	if prog == "" {
+		if d.TotalSize > 0 {
+			prog = fmt.Sprintf("%s %5.1f%% %s/%s", bar(d.Progress(), 30),
+				d.Progress()*100, humanBytes(float64(d.BytesDownloaded())), humanBytes(float64(d.TotalSize)))
+		} else {
+			prog = fmt.Sprintf("%s downloaded", humanBytes(float64(d.BytesDownloaded())))
+		}
 	}
 	line := fmt.Sprintf("[%s] %s %s %s/s ETA %s peers=%d",
-		d.Status, name, prog, humanBytes(s.SpeedBps), eta(s, d), s.Peers)
+		status, name, prog, humanBytes(s.SpeedBps), eta(s, d), s.Peers)
 	if d.Error != "" {
 		line += " ! " + d.Error
 	}

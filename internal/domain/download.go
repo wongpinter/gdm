@@ -60,7 +60,12 @@ type Download struct {
 	ID  string `json:"id"`
 	URL string `json:"url"` // http(s) URL, magnet URI, or path to a .torrent file
 	// Kind is normalized via EffectiveKind(); the zero value means HTTP.
-	Kind          Kind      `json:"kind,omitempty"`
+	Kind Kind `json:"kind,omitempty"`
+	// InfoHash is the lowercase hex torrent info hash for KindTorrent.
+	// Empty for HTTP downloads and for torrents added before identity
+	// parsing existed. It dedupes magnets that differ only in trackers
+	// or display name, and names cached metainfo files.
+	InfoHash      string    `json:"info_hash,omitempty"`
 	Filename      string    `json:"filename"`
 	Dest          string    `json:"dest"` // absolute path on disk (a directory for torrents)
 	TotalSize     int64     `json:"total_size"`
