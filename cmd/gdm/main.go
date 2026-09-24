@@ -31,6 +31,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "organize" {
+		return runOrganize(os.Args[2:], os.Stdout)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."

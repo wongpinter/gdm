@@ -44,6 +44,30 @@ go build -o gdm ./cmd/gdm
 ./gdm ./linux-distro.torrent              # queue a torrent from a local file
 ```
 
+### Media organizer
+
+`gdm organize tv` and `gdm organize movie` organize one file or recursively
+scan a directory. TV matching reads `SxxEyy` and uses TVMaze; show name can
+come from filename, `Show/Season 01` folders, or `--query`. Movie matching
+uses TMDb and needs `TMDB_API_KEY` or `TMDB_READ_ACCESS_TOKEN`; title and year
+are inferred from filename or supplied with `--query`.
+
+Dry-run is default. `--apply` copies matched files. Existing destinations and
+colliding planned paths are never overwritten. Unmatched files are reported
+and return a non-zero exit status. Supported formats: mkv, mp4, m4v, avi, mov,
+mpeg, mpg, ts, webm, wmv.
+
+```sh
+# Preview one TV episode
+./gdm organize tv --input "/downloads/The.Simpsons.S35E03.mkv" --output /library/TV --query "The Simpsons"
+
+# Copy one matched movie after previewing
+TMDB_API_KEY=YOUR_TMDB_KEY ./gdm organize movie --input "/downloads/Arrival (2016).mkv" --output /library/Movies --apply
+
+# Scan folder recursively; preview first, then add --apply to copy
+./gdm organize tv --input /downloads --output /library/TV --query "The Simpsons"
+```
+
 Flags:
 
 | Flag           | Default            | Meaning                                   |
@@ -52,7 +76,8 @@ Flags:
 | `-state`       | `~/.gdm/state`       | where per-download JSON state is kept      |
 | `-connections` | `4`                  | default segments per HTTP download         |
 | `-max-active`  | `3`                  | how many downloads run at once             |
-| `-public-trackers` | `false`          | announce magnets to public fallback trackers while fetching metadata; reveals info hash |
+| `-public-trackers` | `false`          | announce magnets to public fallback trackers during metadata; reveals info hash |
+
 
 State moved from `~/.idm/state` to `~/.gdm/state` when the project
 was renamed; an existing `~/.idm/state` is migrated there automatically
