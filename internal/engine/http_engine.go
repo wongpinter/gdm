@@ -109,14 +109,24 @@ func filenameFrom(rawURL, contentDisposition string) string {
 }
 
 // Run downloads every unfinished segment of d concurrently. It assumes
-// d.Segments and d.Dest are already populated by the manager and that
-// the destination file exists (pre-sized when the total is known).
+// d.Segments and d.Dest are already populated by the manager, creates
+// d.Dest if missing, and pre-sizes it to d.TotalSize when known — one
+// truncate up front instead of the file growing with every WriteAt.
 func (e *HTTPEngine) Run(ctx context.Context, d *domain.Download, events chan<- manager.ProgressEvent) error {
 	file, err := os.OpenFile(d.Dest, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", d.Dest, err)
 	}
 	defer file.Close()
+
+	if d.TotalSize > 0 {
+		// Pre-size while no segment is writing yet: the filesystem
+		// allocates the full extent in one call (and a full disk fails
+		// here, up front, instead of mid-transfer at an arbitrary offset).
+		if err := file.Truncate(d.TotalSize); err != nil {
+			return fmt.Errorf("pre-sizing %s: %w", d.Dest, err)
+		}
+	}
 
 	errCh := make(chan error, len(d.Segments))
 	pending := 0

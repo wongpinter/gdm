@@ -81,6 +81,7 @@ require (
 	github.com/pion/webrtc/v4 v4.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/protolambda/ctxlock v0.1.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/dnscache v0.0.0-20211102005908-e0241e321417 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
@@ -99,6 +100,10 @@ require (
 	golang.org/x/text v0.31.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
+	modernc.org/libc v1.22.3 // indirect
+	modernc.org/mathutil v1.5.0 // indirect
+	modernc.org/memory v1.5.0 // indirect
+	modernc.org/sqlite v1.21.1 // indirect
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
 
@@ -110,16 +115,16 @@ replace (
 	go.opentelemetry.io/otel => github.com/open-telemetry/opentelemetry-go v1.38.0
 	go.opentelemetry.io/otel/metric => github.com/open-telemetry/opentelemetry-go/metric v1.38.0
 	go.opentelemetry.io/otel/trace => github.com/open-telemetry/opentelemetry-go/trace v1.38.0
-	golang.org/x/crypto => github.com/golang/crypto v0.31.0
-	golang.org/x/exp => github.com/golang/exp v0.0.0-20240613232115-7f521ea00fb8
+	golang.org/x/crypto => github.com/golang/crypto v0.44.0
+	golang.org/x/exp => github.com/golang/exp v0.0.0-20251113190631-e25ba8c21ef6
 	golang.org/x/mod => github.com/golang/mod v0.20.0
-	golang.org/x/net => github.com/golang/net v0.35.0
-	golang.org/x/sync => github.com/golang/sync v0.10.0
-	golang.org/x/sys => github.com/golang/sys v0.30.0
+	golang.org/x/net => github.com/golang/net v0.47.0
+	golang.org/x/sync => github.com/golang/sync v0.18.0
+	golang.org/x/sys => github.com/golang/sys v0.38.0
 	golang.org/x/telemetry => github.com/golang/telemetry v0.0.0-20240521205824-bda55230c457
 	golang.org/x/term => github.com/golang/term v0.28.0
-	golang.org/x/text => github.com/golang/text v0.21.0
-	golang.org/x/time => github.com/golang/time v0.9.0
+	golang.org/x/text => github.com/golang/text v0.31.0
+	golang.org/x/time => github.com/golang/time v0.14.0
 	golang.org/x/tools => github.com/golang/tools v0.24.0
 	golang.org/x/xerrors => github.com/golang/xerrors v0.0.0-20191204190536-9bdfabe68543
 	google.golang.org/genproto => github.com/googleapis/go-genproto v0.0.0-20190425155659-357c62f0e4bb

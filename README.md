@@ -9,11 +9,15 @@ persistence, and a terminal dashboard — no GUI, no daemon, just one binary.
 - **Segmented HTTP downloads** — splits a file across N connections
   (`Range` requests) and writes each segment straight into its slot in
   the destination file via `WriteAt`, so there's no separate merge step.
+  When the total size is known, the destination is pre-sized in one
+  `Truncate` before the first segment writes.
 - **BitTorrent downloads** — magnet URIs or local `.torrent` files,
   backed by `anacrolix/torrent`. Detected automatically (a `magnet:`
   prefix or `.torrent` extension) wherever you add a download — CLI
   args or the in-dashboard "add" box.
-- **Pause / resume** — for HTTP, pausing cancels the in-flight request
+- **Pause / resume** — a queued download can be paused before it
+  starts: it stays paused instead of launching when a slot frees up.
+  For HTTP, pausing cancels the in-flight request
   context and persists exactly how many bytes each segment has,
   resuming re-issues `Range: bytes=<offset>-<end>` from there. For
   torrents, pausing drops the swarm connection but leaves whatever
@@ -45,9 +49,13 @@ Flags:
 | Flag           | Default            | Meaning                                   |
 |----------------|---------------------|--------------------------------------------|
 | `-dir`         | `~/Downloads`        | where finished files are written           |
-| `-state`       | `~/.idm/state`       | where per-download JSON state is kept      |
+| `-state`       | `~/.gdm/state`       | where per-download JSON state is kept      |
 | `-connections` | `4`                  | default segments per HTTP download         |
 | `-max-active`  | `3`                  | how many downloads run at once             |
+
+State moved from `~/.idm/state` to `~/.gdm/state` when the project
+was renamed; an existing `~/.idm/state` is migrated there automatically
+on first run (the legacy path is kept if the move fails).
 
 Keys inside the dashboard: `a` add a URL, magnet link, or `.torrent`
 path · `p` pause · `r` resume · `x` remove (and delete the file) ·

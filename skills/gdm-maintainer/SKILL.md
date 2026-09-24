@@ -12,7 +12,7 @@ Use this skill for work inside this repository. Keep changes small, boring, and 
 
 - Module: `github.com/wongpinter/gdm`
 - Binary: `cmd/gdm`
-- Runtime state stays at `~/.idm/state` for compatibility. Do not rename it without an explicit migration plan.
+- Runtime state defaults to `~/.gdm/state`. `resolveStateDir` in `cmd/gdm/main.go` migrates a legacy `~/.idm/state` there once and falls back to the legacy path if the move fails; keep that migration intact when touching state paths.
 - Downloads default to `~/Downloads`.
 - No new dependency unless existing standard-library or installed code cannot solve the problem.
 - HTTP and torrent downloads share `domain.Download`; manager owns lifecycle, persistence, and concurrency.

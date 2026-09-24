@@ -2,6 +2,8 @@ package manager
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/wongpinter/gdm/internal/domain"
@@ -67,5 +69,115 @@ func TestClearCancelDoesNotClobberNewRun(t *testing.T) {
 	case <-newCtx.Done():
 	default:
 		t.Fatal("new run cancel function is not active")
+	}
+}
+
+// TestResumeRollsBackWhenSaveFails pins that a failed persist doesn't
+// leave the entry claiming Queued in memory while nothing was saved
+// and no worker was scheduled.
+func TestResumeRollsBackWhenSaveFails(t *testing.T) {
+	e := &entry{dl: &domain.Download{ID: "id", Status: domain.StatusPaused, Error: "boom"}}
+	m := &Manager{entries: map[string]*entry{"id": e}, store: failingLifecycleStore{}}
+
+	if err := m.Resume("id"); err == nil {
+		t.Fatal("Resume succeeded with failing store")
+	}
+	e.mu.Lock()
+	status, errMsg := e.dl.Status, e.dl.Error
+	e.mu.Unlock()
+	if status != domain.StatusPaused || errMsg != "boom" {
+		t.Fatalf("after failed Resume: status=%q error=%q, want paused/boom", status, errMsg)
+	}
+}
+
+// TestPauseQueuedBeforeClaim pins the pre-beginRun pause path: no
+// worker holds a cancel function yet, so Pause flips the status
+// directly and beginRun then refuses to start the download.
+func TestPauseQueuedBeforeClaim(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := &entry{dl: &domain.Download{ID: "id", Status: domain.StatusQueued}}
+	m := &Manager{
+		entries: map[string]*entry{"id": e},
+		store:   lifecycleStore{},
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+
+	if err := m.Pause("id"); err != nil {
+		t.Fatalf("Pause on queued download: %v", err)
+	}
+	e.mu.Lock()
+	status := e.dl.Status
+	e.mu.Unlock()
+	if status != domain.StatusPaused {
+		t.Fatalf("status = %q, want paused", status)
+	}
+	if _, _, ok := m.beginRun(e); ok {
+		t.Fatal("beginRun claimed a paused download")
+	}
+}
+
+// TestAbandonRun pins how a claimed-but-never-started run ends: a user
+// pause is recorded as Paused, while a manager shutdown leaves the
+// status Queued so the download restarts on the next run.
+func TestAbandonRun(t *testing.T) {
+	t.Run("user pause becomes paused", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		e := &entry{dl: &domain.Download{ID: "id", Status: domain.StatusQueued}, runID: 1}
+		m := &Manager{entries: map[string]*entry{"id": e}, store: lifecycleStore{}, ctx: ctx, cancel: cancel}
+
+		runCtx, cancelRun := context.WithCancel(ctx)
+		cancelRun() // user hit pause while the worker was waiting for its slot
+		m.abandonRun("id", 1, runCtx)
+
+		e.mu.Lock()
+		status := e.dl.Status
+		gotCancel := e.cancel
+		e.mu.Unlock()
+		if status != domain.StatusPaused {
+			t.Fatalf("status = %q, want paused", status)
+		}
+		if gotCancel != nil {
+			t.Fatal("abandonRun left a stale cancel function installed")
+		}
+	})
+
+	t.Run("shutdown leaves queued", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		e := &entry{dl: &domain.Download{ID: "id", Status: domain.StatusQueued}, runID: 1}
+		m := &Manager{entries: map[string]*entry{"id": e}, store: lifecycleStore{}, ctx: ctx, cancel: cancel}
+
+		cancel() // process shutdown cancels m.ctx, which cancels runCtx too
+		runCtx, cancelRun := context.WithCancel(ctx)
+		cancelRun()
+		m.abandonRun("id", 1, runCtx)
+
+		e.mu.Lock()
+		status := e.dl.Status
+		e.mu.Unlock()
+		if status != domain.StatusQueued {
+			t.Fatalf("status = %q, want queued (so it requeues on next start)", status)
+		}
+	})
+}
+
+// TestReserveNameSkipsExisting pins the O_EXCL reservation: names of
+// already-present files are never handed out twice.
+func TestReserveNameSkipsExisting(t *testing.T) {
+	dir := t.TempDir()
+	for i, want := range []string{"file.bin", "file (1).bin", "file (2).bin"} {
+		got, err := reserveName(dir, "file.bin")
+		if err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		if got != want {
+			t.Fatalf("call %d: reserveName = %q, want %q", i+1, got, want)
+		}
+		if _, err := os.Stat(filepath.Join(dir, got)); err != nil {
+			t.Fatalf("call %d: reserved file missing: %v", i+1, err)
+		}
 	}
 }

@@ -195,9 +195,11 @@ func (m *Manager) add(dl *domain.Download) (*domain.Download, error) {
 	return snap, nil
 }
 
-// Pause cancels an actively downloading (or probing) transfer. The
-// worker goroutine notices ctx cancellation, persists progress so far,
-// and marks the download Paused.
+// Pause cancels an actively downloading (or probing) transfer, or
+// holds back a queued one whose worker hasn't claimed it yet — either
+// way the download ends up Paused. An active transfer notices ctx
+// cancellation and persists its progress; a queued one is flipped to
+// Paused directly so beginRun refuses to start it.
 func (m *Manager) Pause(id string) error {
 	e := m.getEntry(id)
 	if e == nil {
@@ -205,15 +207,25 @@ func (m *Manager) Pause(id string) error {
 	}
 	e.mu.Lock()
 	cancel := e.cancel
-	e.mu.Unlock()
-	if cancel == nil {
+	if cancel != nil {
+		e.mu.Unlock()
+		cancel()
+		return nil
+	}
+	if e.dl.Status != domain.StatusQueued {
+		e.mu.Unlock()
 		return fmt.Errorf("%s is not active", id)
 	}
-	cancel()
+	e.dl.Status = domain.StatusPaused
+	e.dl.UpdatedAt = time.Now()
+	e.mu.Unlock()
+	m.persist(id)
 	return nil
 }
 
-// Resume requeues a paused or failed download.
+// Resume requeues a paused or failed download. The in-memory Queued
+// state is rolled back if persisting it fails, so memory never claims
+// a state the store rejected and no worker was scheduled for.
 func (m *Manager) Resume(id string) error {
 	e := m.getEntry(id)
 	if e == nil {
@@ -224,12 +236,28 @@ func (m *Manager) Resume(id string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("%s is already active", id)
 	}
+	prevStatus, prevErr := e.dl.Status, e.dl.Error
 	e.dl.Status = domain.StatusQueued
 	e.dl.Error = ""
+	e.dl.UpdatedAt = time.Now()
+	// Invalidate any still-lingering previous run so its late finish
+	// can't flip the Queued state set here back to Paused.
+	if e.cancel != nil {
+		e.cancel()
+		e.cancel = nil
+	}
+	e.runSeq++
+	e.runID = e.runSeq
 	dl := e.dl.Clone()
 	e.mu.Unlock()
 
 	if err := m.store.Save(dl); err != nil {
+		e.mu.Lock()
+		if e.dl.Status == domain.StatusQueued { // untouched while saving
+			e.dl.Status = prevStatus
+			e.dl.Error = prevErr
+		}
+		e.mu.Unlock()
 		return err
 	}
 	m.enqueue(id)
@@ -324,32 +352,81 @@ func (m *Manager) getEntry(id string) *entry {
 	return m.entries[id]
 }
 
+// beginRun claims the next run of e: it installs a fresh cancelable
+// context — before any waiting, so Pause can cancel a run that is only
+// queued or still waiting for its slot — and bumps the run generation
+// that keeps a stale worker's finish/clearCancel from touching a newer
+// run. It refuses (ok=false) when the download is no longer Queued,
+// e.g. it was paused before its worker reached it.
+func (m *Manager) beginRun(e *entry) (context.Context, uint64, bool) {
+	ctx, cancel := context.WithCancel(m.ctx)
+	e.mu.Lock()
+	if e.dl.Status != domain.StatusQueued {
+		e.mu.Unlock()
+		cancel()
+		return nil, 0, false
+	}
+	e.runSeq++
+	runID := e.runSeq
+	e.runID = runID
+	e.cancel = cancel
+	e.mu.Unlock()
+	return ctx, runID, true
+}
+
+// abandonRun drops a claimed run that never started: the download was
+// paused, or the process is shutting down, while the worker waited for
+// its start time or semaphore slot. A user pause is recorded as Paused;
+// a shutdown leaves the status untouched so a Queued download starts
+// again on the next run.
+func (m *Manager) abandonRun(id string, runID uint64, ctx context.Context) {
+	if m.ctx.Err() == nil && ctx.Err() != nil {
+		m.finish(id, runID, ctx.Err(), ctx)
+	}
+	if e := m.getEntry(id); e != nil {
+		e.clearCancel(runID)
+	}
+}
+
 func (m *Manager) enqueue(id string) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		if e := m.getEntry(id); e != nil {
-			e.mu.Lock()
-			startAt := e.dl.StartAt
-			e.mu.Unlock()
-			if !startAt.IsZero() && time.Until(startAt) > 0 {
-				timer := time.NewTimer(time.Until(startAt))
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-				case <-m.ctx.Done():
-					return
-				}
+		e := m.getEntry(id)
+		if e == nil {
+			return
+		}
+		ctx, runID, ok := m.beginRun(e)
+		if !ok {
+			return // paused (or otherwise no longer queued) before claim
+		}
+
+		e.mu.Lock()
+		startAt := e.dl.StartAt
+		e.mu.Unlock()
+		if !startAt.IsZero() && time.Until(startAt) > 0 {
+			timer := time.NewTimer(time.Until(startAt))
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				m.abandonRun(id, runID, ctx)
+				return
 			}
 		}
 		select {
 		case m.sem <- struct{}{}:
-		case <-m.ctx.Done():
+		case <-ctx.Done():
+			m.abandonRun(id, runID, ctx)
 			return
 		}
 		defer func() { <-m.sem }()
+		if ctx.Err() != nil {
+			m.abandonRun(id, runID, ctx)
+			return
+		}
 
-		e := m.getEntry(id)
+		e = m.getEntry(id)
 		if e == nil {
 			return
 		}
@@ -358,28 +435,24 @@ func (m *Manager) enqueue(id string) {
 		e.mu.Unlock()
 
 		if kind == domain.KindTorrent {
-			m.runTorrentDownload(id)
+			m.runTorrentDownload(id, ctx, runID)
 		} else {
-			m.runDownload(id)
+			m.runDownload(id, ctx, runID)
 		}
 	}()
 }
 
 // runDownload drives one download from Queued through to a terminal
 // (or Paused) state: probe if needed, split into segments, hand off to
-// the engine, and aggregate the ProgressEvents it emits.
-func (m *Manager) runDownload(id string) {
+// the engine, and aggregate the ProgressEvents it emits. The run was
+// already claimed by beginRun — ctx and runID belong to it.
+func (m *Manager) runDownload(id string, ctx context.Context, runID uint64) {
 	e := m.getEntry(id)
 	if e == nil {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(m.ctx)
 	e.mu.Lock()
-	e.runSeq++
-	runID := e.runSeq
-	e.runID = runID
-	e.cancel = cancel
 	needsProbe := len(e.dl.Segments) == 0
 	e.mu.Unlock()
 
@@ -399,7 +472,16 @@ func (m *Manager) runDownload(id string) {
 			e.dl.Filename = res.Filename
 		}
 		if e.dl.Dest == "" {
-			e.dl.Dest = filepath.Join(m.downloadDir, uniqueName(m.downloadDir, e.dl.Filename))
+			// Reserve the name with O_EXCL so two concurrent probes of
+			// the same filename can't both pick it.
+			name, rerr := reserveName(m.downloadDir, e.dl.Filename)
+			if rerr != nil {
+				e.mu.Unlock()
+				m.finish(id, runID, rerr, ctx)
+				e.clearCancel(runID)
+				return
+			}
+			e.dl.Dest = filepath.Join(m.downloadDir, name)
 		}
 		e.dl.TotalSize = res.Size
 		e.dl.SupportsRange = res.SupportsRange
@@ -455,8 +537,9 @@ func drainEvents(events chan ProgressEvent, e *entry) {
 // completion. Unlike runDownload it has no probe phase — the torrent
 // library handles metadata & piece selection. The engine keeps the
 // torrent in the client across pause/resume, so a resume picks up
-// instantly without re-adding or re-verifying.
-func (m *Manager) runTorrentDownload(id string) {
+// instantly without re-adding or re-verifying. The run was already
+// claimed by beginRun — ctx and runID belong to it.
+func (m *Manager) runTorrentDownload(id string, ctx context.Context, runID uint64) {
 	e := m.getEntry(id)
 	if e == nil {
 		return
@@ -464,16 +547,9 @@ func (m *Manager) runTorrentDownload(id string) {
 	if m.torrentEngine == nil {
 		e.fail(errors.New("torrent support is not configured"))
 		m.persist(id)
+		e.clearCancel(runID)
 		return
 	}
-
-	ctx, cancel := context.WithCancel(m.ctx)
-	e.mu.Lock()
-	e.runSeq++
-	runID := e.runSeq
-	e.runID = runID
-	e.cancel = cancel
-	e.mu.Unlock()
 
 	e.setStatus(domain.StatusDownloading)
 	m.persist(id)
@@ -660,10 +736,13 @@ func splitSegments(size int64, connections int, supportsRange bool) []domain.Seg
 	return segments
 }
 
-// uniqueName appends " (n)" before the extension until it finds a name
-// that doesn't already exist in dir, so a second download of the same
-// file never clobbers the first.
-func uniqueName(dir, name string) string {
+// reserveName appends " (n)" before the extension until it creates a
+// file under that name with O_CREATE|O_EXCL, atomically reserving it —
+// so a second download probing the same filename concurrently can't
+// pick the same destination (the stat-then-use race uniqueName had).
+// The empty placeholder file doubles as the download's destination;
+// engine.Run opens and writes into it.
+func reserveName(dir, name string) (string, error) {
 	if name == "" {
 		name = "download"
 	}
@@ -671,10 +750,16 @@ func uniqueName(dir, name string) string {
 	base := strings.TrimSuffix(name, ext)
 	candidate := name
 	for i := 1; ; i++ {
-		if _, err := os.Stat(filepath.Join(dir, candidate)); os.IsNotExist(err) {
-			return candidate
+		f, err := os.OpenFile(filepath.Join(dir, candidate), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if os.IsExist(err) {
+			candidate = fmt.Sprintf("%s (%d)%s", base, i, ext)
+			continue
 		}
-		candidate = fmt.Sprintf("%s (%d)%s", base, i, ext)
+		if err != nil {
+			return "", fmt.Errorf("reserving destination for %s: %w", name, err)
+		}
+		f.Close()
+		return candidate, nil
 	}
 }
 

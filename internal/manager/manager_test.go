@@ -253,3 +253,107 @@ func TestRestartRequeuesPausedDownloads(t *testing.T) {
 	}
 	_ = io.Discard
 }
+
+// TestPauseQueuedDownload pins that pausing a queued (not yet started)
+// download succeeds, keeps it from starting when its slot frees up,
+// and that it can still be resumed to completion afterwards.
+func TestPauseQueuedDownload(t *testing.T) {
+	data := []byte("queued pause test payload")
+	srv := newRangeServer(t, data, 0)
+	defer srv.Close()
+
+	mgr := newTestManager(t, engine.New())
+	dl, err := mgr.AddAt(srv.URL+"/testfile.bin", 1, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatalf("AddAt: %v", err)
+	}
+
+	if err := mgr.Pause(dl.ID); err != nil {
+		t.Fatalf("Pause queued download: %v", err)
+	}
+	waitForStatus(t, mgr, dl.ID, "paused")
+	time.Sleep(150 * time.Millisecond)
+	snap, ok := mgr.Get(dl.ID)
+	if !ok {
+		t.Fatal("download disappeared after pause")
+	}
+	if snap.Download.Status != "paused" {
+		t.Fatalf("paused download left the paused state: %q", snap.Download.Status)
+	}
+	if snap.Download.BytesDownloaded() != 0 {
+		t.Fatalf("paused download transferred %d bytes before starting", snap.Download.BytesDownloaded())
+	}
+
+	if err := mgr.Resume(dl.ID); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	snap = waitForStatus(t, mgr, dl.ID, "completed", "failed")
+	if snap.Download.Status != "completed" {
+		t.Fatalf("download ended in status %q, error: %s", snap.Download.Status, snap.Download.Error)
+	}
+	got, err := os.ReadFile(snap.Download.Dest)
+	if err != nil {
+		t.Fatalf("reading downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("content mismatch (got %d bytes, want %d)", len(got), len(data))
+	}
+}
+
+// TestDestinationPresizedWhileDownloading pins that engine.Run
+// truncates the destination to TotalSize before any segment writes:
+// the file has its full extent while bytes are still in flight, not
+// only after the transfer completes.
+func TestDestinationPresizedWhileDownloading(t *testing.T) {
+	data := make([]byte, 300_000)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatalf("generating test data: %v", err)
+	}
+
+	// 100ms per read: segments take several hundred ms end to end,
+	// giving the poll below a wide window to observe the pre-sized file
+	// while the download is genuinely still under way.
+	srv := newRangeServer(t, data, 100*time.Millisecond)
+	defer srv.Close()
+
+	mgr := newTestManager(t, engine.New())
+	dl, err := mgr.Add(srv.URL+"/testfile.bin", 4)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	waitForStatus(t, mgr, dl.ID, "downloading")
+
+	presized := false
+	deadline := time.Now().Add(10 * time.Second)
+	for !presized && time.Now().Before(deadline) {
+		snap, ok := mgr.Get(dl.ID)
+		if !ok {
+			t.Fatal("download disappeared")
+		}
+		if snap.Download.Status == "failed" {
+			t.Fatalf("download failed: %s", snap.Download.Error)
+		}
+		if fi, serr := os.Stat(snap.Download.Dest); serr == nil &&
+			fi.Size() == int64(len(data)) &&
+			snap.Download.BytesDownloaded() < int64(len(data)) {
+			presized = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !presized {
+		t.Fatal("destination file never observed pre-sized while the download was still in flight")
+	}
+
+	snap := waitForStatus(t, mgr, dl.ID, "completed", "failed")
+	if snap.Download.Status != "completed" {
+		t.Fatalf("download ended in status %q, error: %s", snap.Download.Status, snap.Download.Error)
+	}
+	fi, err := os.Stat(snap.Download.Dest)
+	if err != nil {
+		t.Fatalf("stat downloaded file: %v", err)
+	}
+	if fi.Size() != int64(len(data)) {
+		t.Errorf("final file size = %d, want %d", fi.Size(), len(data))
+	}
+}
