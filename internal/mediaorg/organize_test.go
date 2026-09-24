@@ -2,6 +2,7 @@ package mediaorg
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -129,6 +130,42 @@ func TestRunApplyCopiesAndRefusesOverwrite(t *testing.T) {
 	}
 }
 
+func TestRunApplySourceAlreadyAtDestinationDoesNotTruncate(t *testing.T) {
+	t.Setenv("TMDB_READ_ACCESS_TOKEN", "test-token")
+	root := t.TempDir()
+	file := filepath.Join(root, "Arrival (2016)", "Arrival (2016).mkv")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("keep source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := movieServer(t)
+	defer server.Close()
+	var log strings.Builder
+	err := Run(context.Background(), Options{
+		Kind: Movie, Input: file, Output: root, Apply: true, TMDBURL: server.URL,
+	}, &log)
+	if err == nil {
+		t.Fatal("organizing a file already at its destination should fail")
+	}
+	if b, err := os.ReadFile(file); err != nil || string(b) != "keep source" {
+		t.Fatalf("source changed: %q, err=%v", b, err)
+	}
+}
+
+func TestDiscoveryRejectsOutputUnderFileInput(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "Arrival.mkv")
+	if err := os.WriteFile(input, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := discover(input, filepath.Join(input, "organized"))
+	if err == nil {
+		t.Fatal("output below input file should be rejected")
+	}
+}
+
 func TestDiscoverySkipsOutputNestedInsideInput(t *testing.T) {
 	root := t.TempDir()
 	input := filepath.Join(root, "library")
@@ -144,9 +181,12 @@ func TestDiscoverySkipsOutputNestedInsideInput(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, err := discover(input, output)
+	files, issues, err := discover(input, output)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("scan issues = %+v", issues)
 	}
 	if len(files) != 1 || filepath.Base(files[0]) != "Arrival (2016).mkv" {
 		t.Fatalf("discovered files = %v", files)
@@ -173,6 +213,67 @@ func TestMovieYearlessFilenameUsesFullTitle(t *testing.T) {
 	}
 	if !strings.HasSuffix(items[0].Destination, filepath.Join("Arrival (2016)", "Arrival (2016).mkv")) {
 		t.Fatalf("destination = %q", items[0].Destination)
+	}
+}
+
+func TestMovieRejectsInvalidTMDbMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, title, releaseDate string
+	}{
+		{name: "empty sanitized title", title: ".", releaseDate: "2016-11-10"},
+		{name: "invalid date", title: "Arrival", releaseDate: "2016-99-99"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMDB_READ_ACCESS_TOKEN", "test-token")
+			root := t.TempDir()
+			file := filepath.Join(root, "Arrival.mkv")
+			if err := os.WriteFile(file, []byte("video"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"results":[{"title":%q,"release_date":%q}]}`, tc.title, tc.releaseDate)
+			}))
+			defer server.Close()
+			items, err := Plan(context.Background(), Options{
+				Kind: Movie, Input: file, Output: filepath.Join(root, "out"), TMDBURL: server.URL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != 1 || items[0].Err == nil {
+				t.Fatalf("Plan = %+v; expected invalid metadata error", items)
+			}
+		})
+	}
+}
+
+func TestDiscoveryReportsUnreadableSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input")
+	child := filepath.Join(input, "locked")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(input, "Arrival (2016).mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(child, "Hidden (2000).mkv"), []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(child, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(child, 0o755)
+	if _, err := os.ReadDir(child); err == nil {
+		t.Skip("current user can read mode-000 directory")
+	}
+
+	files, issues, err := discover(input, filepath.Join(root, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || len(issues) != 1 || issues[0].Source != child || issues[0].Err == nil {
+		t.Fatalf("files = %v, scan issues = %+v", files, issues)
 	}
 }
 

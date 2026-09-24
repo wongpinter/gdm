@@ -100,11 +100,11 @@ func Plan(ctx context.Context, opts Options) ([]Item, error) {
 	if filepath.Clean(input) == filepath.Clean(output) {
 		return nil, errors.New("input and output directories must differ")
 	}
-	files, err := discover(input, output)
+	files, scanIssues, err := discover(input, output)
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 {
+	if len(files) == 0 && len(scanIssues) == 0 {
 		return nil, fmt.Errorf("no supported video files found in %s", input)
 	}
 
@@ -125,7 +125,8 @@ func Plan(ctx context.Context, opts Options) ([]Item, error) {
 		o.tmdb = "https://api.themoviedb.org/3"
 	}
 
-	items := make([]Item, 0, len(files))
+	items := make([]Item, 0, len(files)+len(scanIssues))
+	items = append(items, scanIssues...)
 	for _, file := range files {
 		item := Item{Source: file}
 		var rel string
@@ -150,11 +151,11 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	failed := 0
+	failed, completed := 0, 0
 	for _, item := range items {
 		if item.Err != nil {
 			failed++
-			fmt.Fprintf(out, "[NO MATCH] %s: %v\n", item.Source, item.Err)
+			fmt.Fprintf(out, "[FAILED] %s: %v\n", item.Source, item.Err)
 			continue
 		}
 		if opts.Apply {
@@ -167,33 +168,39 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 		} else {
 			fmt.Fprintf(out, "[DRY-RUN] %s -> %s\n", item.Source, item.Destination)
 		}
+		completed++
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d of %d files could not be organized", failed, len(items))
 	}
 	if opts.Apply {
-		fmt.Fprintf(out, "Copied %d file(s).\n", len(items))
+		fmt.Fprintf(out, "Copied %d file(s).\n", completed)
 	} else {
-		fmt.Fprintf(out, "Previewed %d file(s); pass --apply to copy.\n", len(items))
+		fmt.Fprintf(out, "Previewed %d file(s); pass --apply to copy.\n", completed)
 	}
 	return nil
 }
 
-func discover(input, output string) ([]string, error) {
+func discover(input, output string) ([]string, []Item, error) {
 	info, err := os.Stat(input)
 	if err != nil {
-		return nil, fmt.Errorf("reading input: %w", err)
+		return nil, nil, fmt.Errorf("reading input: %w", err)
 	}
 	if !info.IsDir() {
 		if info.Mode().IsRegular() && videoExts[strings.ToLower(filepath.Ext(input))] {
-			return []string{input}, nil
+			if within(input, output) {
+				return nil, nil, errors.New("output path cannot be inside the input file")
+			}
+			return []string{input}, nil, nil
 		}
-		return nil, fmt.Errorf("input must be a directory or supported video file: %s", input)
+		return nil, nil, fmt.Errorf("input must be a directory or supported video file: %s", input)
 	}
 	var files []string
+	var scanIssues []Item
 	err = filepath.WalkDir(input, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			scanIssues = append(scanIssues, Item{Source: path, Err: fmt.Errorf("scanning path: %w", walkErr)})
+			return nil
 		}
 		if entry.IsDir() && path != input && (path == output || within(output, path)) {
 			return filepath.SkipDir
@@ -205,9 +212,9 @@ func discover(input, output string) ([]string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scanning input: %w", err)
+		return nil, nil, fmt.Errorf("scanning input: %w", err)
 	}
-	return files, nil
+	return files, scanIssues, nil
 }
 
 func within(parent, path string) bool {
@@ -257,8 +264,12 @@ func (o *organizer) tvPath(ctx context.Context, input, file, override string) (s
 		return "", fmt.Errorf("%s has no S%02dE%02d episode", show.Name, season, episode)
 	}
 	showName := cleanName(show.Name)
+	episodeName := cleanName(title)
+	if showName == "" || episodeName == "" {
+		return "", errors.New("TVMaze returned an empty show or episode name after filename sanitization")
+	}
 	ext := filepath.Ext(file)
-	filename := fmt.Sprintf("%s - S%02dE%02d - %s%s", showName, season, episode, cleanName(title), ext)
+	filename := fmt.Sprintf("%s - S%02dE%02d - %s%s", showName, season, episode, episodeName, ext)
 	return filepath.Join(showName, fmt.Sprintf("Season %02d", season), filename), nil
 }
 
@@ -336,7 +347,12 @@ func (o *organizer) moviePath(ctx context.Context, file, override string) (strin
 		}
 		o.movies[key] = found
 	}
-	label := cleanName(found.Title) + " (" + found.ReleaseDate[:4] + ")"
+	title := cleanName(found.Title)
+	date, err := time.Parse("2006-01-02", found.ReleaseDate)
+	if title == "" || err != nil {
+		return "", fmt.Errorf("TMDb result for %q has invalid title or release date", query)
+	}
+	label := title + " (" + date.Format("2006") + ")"
 	return filepath.Join(label, label+filepath.Ext(file)), nil
 }
 
@@ -391,6 +407,10 @@ func markCollisions(items []Item) {
 		if items[i].Err != nil {
 			continue
 		}
+		if filepath.Clean(items[i].Source) == filepath.Clean(items[i].Destination) {
+			items[i].Err = errors.New("source already matches destination; refusing to copy onto itself")
+			continue
+		}
 		key := strings.ToLower(filepath.Clean(items[i].Destination))
 		if previous, ok := seen[key]; ok {
 			items[i].Err = fmt.Errorf("destination collides with %s", items[previous].Source)
@@ -406,6 +426,9 @@ func markCollisions(items []Item) {
 }
 
 func copyNew(source, destination string) error {
+	if filepath.Clean(source) == filepath.Clean(destination) {
+		return errors.New("source and destination are the same path")
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return fmt.Errorf("creating destination directory: %w", err)
 	}
