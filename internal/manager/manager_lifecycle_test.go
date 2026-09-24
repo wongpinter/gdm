@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wongpinter/gdm/internal/domain"
 )
@@ -38,6 +39,30 @@ func TestFinishCanceledRunBecomesPaused(t *testing.T) {
 	m.finish("id", 1, context.Canceled, ctx)
 	if e.dl.Status != domain.StatusPaused {
 		t.Fatalf("status = %q, want paused", e.dl.Status)
+	}
+}
+
+func TestTorrentSpeedUsesMonotonicNetworkBytes(t *testing.T) {
+	now := time.Now()
+	e := &entry{
+		dl:         &domain.Download{TotalSize: 100, Segments: []domain.Segment{{End: 99, Downloaded: 80}}},
+		lastSample: now.Add(-time.Second),
+		lastBytes:  1_000,
+		speedBytes: 2_000,
+	}
+	e.updateSpeed()
+	if e.speed <= 0 {
+		t.Fatalf("speed = %v, want positive rate from monotonic network bytes", e.speed)
+	}
+
+	// Completed piece bytes can decrease after hash failure; network
+	// bytes remain monotonic and must continue producing a sane rate.
+	e.dl.Segments[0].Downloaded = 10
+	e.lastSample = time.Now().Add(-time.Second)
+	e.speedBytes = 3_000
+	e.updateSpeed()
+	if e.speed <= 0 {
+		t.Fatalf("speed after hash failure = %v, want positive", e.speed)
 	}
 }
 

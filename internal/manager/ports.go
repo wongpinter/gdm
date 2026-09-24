@@ -52,8 +52,12 @@ type TorrentStats struct {
 	Name            string
 	TotalSize       int64
 	BytesDownloaded int64
-	Peers           int
-	Done            bool
+	// BytesRead is cumulative useful payload received from peers. Unlike
+	// BytesDownloaded it never decreases after a failed piece hash, so it
+	// is the stable counter used for torrent speed calculation.
+	BytesRead int64
+	Peers     int
+	Done      bool
 }
 
 // TorrentEngine performs BitTorrent downloads: given a magnet URI or a

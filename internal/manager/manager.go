@@ -38,6 +38,11 @@ type entry struct {
 
 	lastSample time.Time
 	lastBytes  int64
+	// speedBytes is a transport-provided monotonic byte counter. HTTP
+	// leaves it at zero and uses Download.BytesDownloaded; torrents use
+	// cumulative useful network bytes so hash failures don't yield
+	// negative or erratic speed readings.
+	speedBytes int64
 	speed      float64
 	peers      int
 }
@@ -562,8 +567,10 @@ func (m *Manager) runTorrentDownload(id string, ctx context.Context, runID uint6
 	done := make(chan error, 1)
 	go func() { done <- m.torrentEngine.Start(ctx, id, runInput, stats) }()
 
-	// Piece events come in ~every 250ms from the engine — use them as
-	// speed-update triggers so we don't need a separate ticker.
+	// Stats may arrive more often than UI samples. Calculate speed on a
+	// fixed cadence so bursty piece events don't produce noisy rates.
+	speedTicker := time.NewTicker(750 * time.Millisecond)
+	defer speedTicker.Stop()
 	persistTicker := time.NewTicker(2 * time.Second)
 	defer persistTicker.Stop()
 
@@ -571,6 +578,7 @@ func (m *Manager) runTorrentDownload(id string, ctx context.Context, runID uint6
 		select {
 		case st := <-stats:
 			m.applyTorrentStats(e, st)
+		case <-speedTicker.C:
 			e.updateSpeed()
 		case <-persistTicker.C:
 			m.persist(id)
@@ -610,6 +618,7 @@ func (m *Manager) applyTorrentStats(e *entry, st TorrentStats) {
 		e.dl.TotalSize = st.TotalSize
 		e.dl.Segments = []domain.Segment{{Index: 0, Start: 0, End: st.TotalSize - 1, Downloaded: st.BytesDownloaded}}
 	}
+	e.speedBytes = st.BytesRead
 	e.peers = st.Peers
 	e.dl.UpdatedAt = time.Now()
 }
@@ -693,6 +702,9 @@ func (e *entry) updateSpeed() {
 	defer e.mu.Unlock()
 	now := time.Now()
 	current := e.dl.BytesDownloaded()
+	if e.speedBytes > 0 {
+		current = e.speedBytes
+	}
 	if e.lastSample.IsZero() {
 		e.lastSample = now
 		e.lastBytes = current

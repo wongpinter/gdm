@@ -19,15 +19,15 @@ import (
 	"github.com/wongpinter/gdm/internal/manager"
 )
 
-// config tuning knobs derived from the anacrolix/torrent ClientConfig
-// defaults (EstablishedConnsPerTorrent=55, HalfOpenConnsPerTorrent=25).
-const (
-	establishedConns = 80  // library default 55; bump for more peer fan-out
-	halfOpenConns    = 40  // library default 25; faster initial peer acquisition
-	peersHighWater   = 200 // library default 200; keep it
-	peersLowWater    = 30  // library default 30
-	pieceHashers     = 4   // library default 2; more cores → faster verification
-)
+// fallbackTrackers supplement stale tracker lists after metadata proves
+// the torrent is public. HTTPS matters on Colab and similar networks
+// that often block UDP; separate tiers let each endpoint announce.
+// Private torrents never receive these trackers (BEP 27).
+var fallbackTrackers = [][]string{
+	{"https://tracker.opentrackr.org:443/announce"},
+	{"udp://tracker.opentrackr.org:1337/announce"},
+	{"udp://tracker.openbittorrent.com:6969/announce"},
+}
 
 // Engine implements manager.TorrentEngine over a shared torrent.Client.
 // Torrents are keyed by manager-assigned download ID and stay in the
@@ -49,11 +49,10 @@ func New(dataDir string) (*Engine, error) {
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = dataDir
 	cfg.Seed = true // keep pieces available for resume verification
-	cfg.EstablishedConnsPerTorrent = establishedConns
-	cfg.HalfOpenConnsPerTorrent = halfOpenConns
-	cfg.TorrentPeersHighWater = peersHighWater
-	cfg.TorrentPeersLowWater = peersLowWater
-	cfg.PieceHashersPerTorrent = pieceHashers
+	// Keep anacrolix's balanced connection, peer-watermark, hashing,
+	// and unverified-byte defaults. Earlier overrides raised fan-out and
+	// hashing while lowering the peer pool; that caused CPU/socket churn
+	// and less consistent throughput on constrained Colab runtimes.
 
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
@@ -99,19 +98,18 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 		return ctx.Err()
 	}
 
-	// Enable downloading — idempotent across pause/resume cycles.
-	t.AllowDataDownload()
-
-	// Sequential-first: raise priority of the first ~10% of pieces so
-	// the file is usable as early as possible. DownloadAll covers the
-	// rest at normal priority.
-	if np := int(t.NumPieces()); np > 10 {
-		stride := np / 10
-		if stride < 10 {
-			stride = 10
-		}
-		t.DownloadPieces(0, stride)
+	// Add protocol-diverse fallbacks only after BEP 27 metadata proves
+	// this isn't a private torrent. AddTrackers deduplicates endpoints
+	// already present in the magnet or .torrent file.
+	if info := t.Info(); info != nil && (info.Private == nil || !*info.Private) {
+		t.AddTrackers(fallbackTrackers)
 	}
+
+	// Enable downloading — idempotent across pause/resume cycles.
+	// Let anacrolix's rarest-first request strategy choose all pieces;
+	// prioritizing an initial slice reduces swarm diversity and can stall
+	// when few peers own those pieces.
+	t.AllowDataDownload()
 	t.DownloadAll()
 
 	err = e.streamStats(ctx, t, stats)
@@ -157,11 +155,13 @@ func (e *Engine) streamStats(ctx context.Context, t *torrent.Torrent, stats chan
 // context is done (caller should return ctx.Err()).
 func sendStats(ctx context.Context, t *torrent.Torrent, stats chan<- manager.TorrentStats) bool {
 	done := t.Complete().Bool()
+	torrentStats := t.Stats()
 	st := manager.TorrentStats{
 		Name:            t.Name(),
 		TotalSize:       t.Length(),
 		BytesDownloaded: t.BytesCompleted(),
-		Peers:           len(t.PeerConns()),
+		BytesRead:       torrentStats.BytesReadUsefulData.Int64(),
+		Peers:           torrentStats.ActivePeers,
 		Done:            done,
 	}
 	select {

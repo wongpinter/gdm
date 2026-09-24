@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,20 @@ func buildTorrent(t *testing.T, seedDir, name string, size int) (metainfo.Info, 
 	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
 	mi.SetDefaults()
 	return info, mi, mi.HashInfoBytes()
+}
+
+func TestFallbackTrackersIncludeHTTPS(t *testing.T) {
+	var hasHTTPS bool
+	for _, tier := range fallbackTrackers {
+		for _, tracker := range tier {
+			if strings.HasPrefix(tracker, "https://") {
+				hasHTTPS = true
+			}
+		}
+	}
+	if !hasHTTPS {
+		t.Fatal("fallback trackers need HTTPS for networks that block UDP")
+	}
 }
 
 func TestEndToEndDownload(t *testing.T) {
@@ -116,10 +131,17 @@ func TestEndToEndDownload(t *testing.T) {
 	}
 
 	var lastStats manager.TorrentStats
+	var maxBytesRead int64
 	for {
 		select {
 		case st := <-stats:
 			lastStats = st
+			if st.BytesRead < maxBytesRead {
+				t.Fatalf("BytesRead decreased: got %d after %d", st.BytesRead, maxBytesRead)
+			}
+			if st.BytesRead > maxBytesRead {
+				maxBytesRead = st.BytesRead
+			}
 			if st.Done {
 				goto downloaded
 			}
@@ -130,6 +152,9 @@ func TestEndToEndDownload(t *testing.T) {
 		}
 	}
 downloaded:
+	if maxBytesRead == 0 {
+		t.Fatal("torrent stats never reported useful network bytes")
+	}
 	if err := <-runErr; err != nil {
 		t.Fatalf("Run returned an error after completion: %v", err)
 	}
