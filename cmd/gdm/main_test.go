@@ -3,8 +3,33 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestReorderArgsFlagsAfterPositional(t *testing.T) {
+	in := []string{"--headless", "magnet:?xt=urn:btih:abc", "-dir", "/x", "-state", "/s", "-interval", "500ms"}
+	want := []string{"--headless", "-dir", "/x", "-state", "/s", "-interval", "500ms", "magnet:?xt=urn:btih:abc"}
+	if got := reorderArgs(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reorderArgs = %q, want %q", got, want)
+	}
+}
+
+func TestReorderArgsKeepsOrderAndDoubleDash(t *testing.T) {
+	in := []string{"-dir", "/x", "a", "--headless", "--", "-dir", "b"}
+	want := []string{"-dir", "/x", "--headless", "a", "-dir", "b"}
+	if got := reorderArgs(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reorderArgs = %q, want %q", got, want)
+	}
+}
+
+func TestReorderArgsEqualsForm(t *testing.T) {
+	in := []string{"magnet:abc", "-dir=/x", "--interval=500ms"}
+	want := []string{"-dir=/x", "--interval=500ms", "magnet:abc"}
+	if got := reorderArgs(in); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reorderArgs = %q, want %q", got, want)
+	}
+}
 
 func writeMarker(t *testing.T, dir string) string {
 	t.Helper()

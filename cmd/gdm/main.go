@@ -41,6 +41,10 @@ func run() error {
 	maxActive := flag.Int("max-active", 3, "maximum number of downloads running at once")
 	headless := flag.Bool("headless", false, "run without TUI: print progress to stdout and wait until queued downloads finish (for Colab / CI / no-TTY)")
 	interval := flag.Duration("interval", 2*time.Second, "headless progress refresh interval (e.g. 500ms for smoother bars)")
+	// Flags may come before or after download URLs — Go's flag package
+	// stops at the first positional, so without this `./gdm 'magnet:..'`
+	// `-dir /x` would silently queue -dir, /x, ... as download URLs.
+	os.Args = append([]string{os.Args[0]}, reorderArgs(os.Args[1:])...)
 	flag.Parse()
 
 	st, err := store.New(*stateDir)
@@ -345,6 +349,56 @@ func headlessResult(mgr *manager.Manager, ids []string) error {
 	}
 	fmt.Println("gdm: all downloads finished")
 	return nil
+}
+
+// boolFlags are flags that take no value — everything else starting
+// with - consumes the next arg as its value during reordering.
+var boolFlags = map[string]bool{"headless": true, "h": true, "help": true}
+
+// reorderArgs moves flags before positional args so flag order is
+// free: `./gdm -dir /x 'magnet:..'` and `./gdm 'magnet:..' -dir /x`
+// parse identically. Preserves relative order within each group and
+// honors `--` as end-of-flags.
+func reorderArgs(args []string) []string {
+	var flags, positionals []string
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		name, hasValue := flagName(a)
+		if name == "" {
+			positionals = append(positionals, a)
+			i++
+			continue
+		}
+		flags = append(flags, a)
+		i++
+		if !hasValue && !boolFlags[name] && i < len(args) {
+			flags = append(flags, args[i])
+			i++
+		}
+	}
+	return append(flags, positionals...)
+}
+
+// flagName reports the flag name if a looks like -name or --name
+// (with optional =value). Second return is true for -name=value.
+// Returns ("", false) for positionals (magnet URIs, URLs, paths).
+func flagName(a string) (string, bool) {
+	if len(a) < 2 || a[0] != '-' {
+		return "", false
+	}
+	s := strings.TrimLeft(a, "-")
+	if s == "" {
+		return "", false
+	}
+	if j := strings.Index(s, "="); j >= 0 {
+		return s[:j], true
+	}
+	return s, false
 }
 
 // isTorrentSource reports whether arg names a torrent (a magnet URI or
