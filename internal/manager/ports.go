@@ -63,9 +63,11 @@ type TorrentStats struct {
 	// BytesRead is cumulative useful payload received from peers. Unlike
 	// BytesDownloaded it never decreases after a failed piece hash, so it
 	// is the stable counter used for torrent speed calculation.
-	BytesRead int64
-	Peers     int
-	Done      bool
+	BytesRead  int64
+	Peers      int // established peer connections
+	FoundPeers int // peers known from trackers, DHT, and peer exchange
+	Pending    int // peer connection attempts in progress
+	Done       bool
 	// Stage is the engine-reported phase: "metadata" while fetching
 	// torrent info, "downloading" once pieces can flow. Empty for
 	// engines that don't report stages.

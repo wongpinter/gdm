@@ -71,6 +71,29 @@ func TestFallbackTrackersIncludeHTTPS(t *testing.T) {
 	if !hasHTTPS {
 		t.Fatal("fallback trackers need HTTPS for networks that block UDP")
 	}
+	if len(fallbackTrackers) < 4 {
+		t.Fatalf("want several independent fallback tracker tiers, got %d", len(fallbackTrackers))
+	}
+}
+
+func TestFallbackTrackersAreProtocolDiverseAndTiered(t *testing.T) {
+	seen := map[string]bool{}
+	var hasHTTPS, hasUDP bool
+	for _, tier := range fallbackTrackers {
+		if len(tier) != 1 {
+			t.Fatalf("tracker tiers must stay separate, got %v", tier)
+		}
+		tracker := tier[0]
+		if seen[tracker] {
+			t.Fatalf("duplicate fallback tracker %q", tracker)
+		}
+		seen[tracker] = true
+		hasHTTPS = hasHTTPS || strings.HasPrefix(tracker, "https://")
+		hasUDP = hasUDP || strings.HasPrefix(tracker, "udp://")
+	}
+	if !hasHTTPS || !hasUDP {
+		t.Fatalf("fallbacks should cover HTTPS and UDP, got %v", fallbackTrackers)
+	}
 }
 
 func TestShouldAddFallbackRespectsPrivateFlag(t *testing.T) {

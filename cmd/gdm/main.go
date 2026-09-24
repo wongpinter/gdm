@@ -289,8 +289,11 @@ func barLine(mgr *manager.Manager, id string) string {
 			prog = fmt.Sprintf("%s downloaded", humanBytes(float64(d.BytesDownloaded())))
 		}
 	}
-	line := fmt.Sprintf("[%s] %s %s %s/s ETA %s peers=%d",
-		status, name, prog, humanBytes(s.SpeedBps), eta(s, d), s.Peers)
+	line := fmt.Sprintf("[%s] %s %s %s/s ETA %s",
+		status, name, prog, humanBytes(s.SpeedBps), eta(s, d))
+	if d.EffectiveKind() == domain.KindTorrent {
+		line += fmt.Sprintf(" peers=%d found=%d pending=%d", s.Peers, s.TorrentFound, s.TorrentPending)
+	}
 	if d.Error != "" {
 		line += " ! " + d.Error
 	}

@@ -30,6 +30,8 @@ type Snapshot struct {
 	// KindTorrent; empty/false for HTTP downloads.
 	TorrentStage   string
 	TorrentStalled bool
+	TorrentFound   int
+	TorrentPending int
 }
 
 // entry is the manager's private, mutable record for one download.
@@ -55,6 +57,8 @@ type entry struct {
 	// surfaced via Snapshot for TUI/CLI display.
 	torrentStage   string
 	torrentStalled bool
+	torrentFound   int
+	torrentPending int
 }
 
 // Manager is the application service at the center of the hexagon: it
@@ -369,7 +373,7 @@ func (m *Manager) Get(id string) (Snapshot, bool) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Snapshot{Download: e.dl.Clone(), SpeedBps: e.speed, Peers: e.peers, TorrentStage: e.torrentStage, TorrentStalled: e.torrentStalled}, true
+	return Snapshot{Download: e.dl.Clone(), SpeedBps: e.speed, Peers: e.peers, TorrentStage: e.torrentStage, TorrentStalled: e.torrentStalled, TorrentFound: e.torrentFound, TorrentPending: e.torrentPending}, true
 }
 
 // List returns every known download in the order it was added.
@@ -671,6 +675,8 @@ func (m *Manager) applyTorrentStats(e *entry, st TorrentStats) {
 	}
 	e.speedBytes = st.BytesRead
 	e.peers = st.Peers
+	e.torrentFound = st.FoundPeers
+	e.torrentPending = st.Pending
 	e.torrentStage = st.Stage
 	e.torrentStalled = st.Stalled
 	e.dl.UpdatedAt = time.Now()

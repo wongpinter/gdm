@@ -52,6 +52,7 @@ Flags:
 | `-state`       | `~/.gdm/state`       | where per-download JSON state is kept      |
 | `-connections` | `4`                  | default segments per HTTP download         |
 | `-max-active`  | `3`                  | how many downloads run at once             |
+| `-public-trackers` | `false`          | announce magnets to public fallback trackers while fetching metadata; reveals info hash |
 
 State moved from `~/.idm/state` to `~/.gdm/state` when the project
 was renamed; an existing `~/.idm/state` is migrated there automatically
@@ -161,5 +162,7 @@ access to the Go module proxy, none of this is necessary — the
   doesn't dynamically add connections to a slow segment.
 - Paused torrents retain their swarm and piece state in the shared client;
   resume reuses that retained torrent. Explicit removal drops the torrent.
-- No DHT/tracker configuration exposed (uses the library's defaults);
-  no seeding-after-complete toggle.
+- No custom DHT or tracker configuration; public torrents get built-in
+  fallback trackers after metadata. `-public-trackers` enables public
+  tracker announces before magnet metadata arrives and reveals the info hash.
+  No seeding-after-complete toggle.

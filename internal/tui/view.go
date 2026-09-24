@@ -16,7 +16,7 @@ const (
 	colPct    = 5
 	colSpeed  = 10
 	colSize   = 10
-	colPeers  = 6
+	colPeers  = 10
 	colETA    = 8
 )
 
@@ -151,7 +151,7 @@ func (m Model) renderHeader() string {
 		pad("PROGRESS", colBar+colPct+1),
 		pad("SPEED", colSpeed),
 		pad("SIZE", colSize),
-		pad("PEERS", colPeers),
+		pad("PEER A/F", colPeers),
 		pad("ETA", colETA),
 	}
 	return headerStyle.Render(strings.Join(cols, " "))
@@ -190,7 +190,10 @@ func (m Model) renderRow(i int, snap manager.Snapshot) string {
 	}
 	peers := "-"
 	if d.EffectiveKind() == domain.KindTorrent {
-		peers = fmt.Sprintf("%d", snap.Peers)
+		peers = fmt.Sprintf("%d/%d", snap.Peers, snap.TorrentFound)
+		if snap.TorrentPending > 0 {
+			peers += fmt.Sprintf("+%d", snap.TorrentPending)
+		}
 	}
 
 	if m.narrow() {

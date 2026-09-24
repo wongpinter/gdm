@@ -29,6 +29,8 @@ import (
 // Private torrents never receive these trackers (BEP 27).
 var fallbackTrackers = [][]string{
 	{"https://tracker.opentrackr.org:443/announce"},
+	{"https://tracker.foreverpirates.co:443/announce"},
+	{"https://tracker.onetracker.net:443/announce"},
 	{"udp://tracker.opentrackr.org:1337/announce"},
 	{"udp://tracker.openbittorrent.com:6969/announce"},
 }
@@ -191,10 +193,13 @@ func (e *Engine) waitMetadata(ctx context.Context, t *torrent.Torrent, uri strin
 		name = t.Name()
 	}
 	send := func() bool {
+		torrentStats := t.Stats()
 		st := manager.TorrentStats{
-			Name:  name,
-			Peers: len(t.PeerConns()),
-			Stage: manager.StageMetadata,
+			Name:       name,
+			Peers:      torrentStats.ActivePeers,
+			FoundPeers: torrentStats.TotalPeers,
+			Pending:    torrentStats.PendingPeers,
+			Stage:      manager.StageMetadata,
 		}
 		select {
 		case stats <- st:
@@ -312,6 +317,8 @@ func sendStats(ctx context.Context, t *torrent.Torrent, stats chan<- manager.Tor
 		BytesDownloaded: t.BytesCompleted(),
 		BytesRead:       torrentStats.BytesReadUsefulData.Int64(),
 		Peers:           torrentStats.ActivePeers,
+		FoundPeers:      torrentStats.TotalPeers,
+		Pending:         torrentStats.PendingPeers,
 		Done:            done,
 		Stage:           stage,
 		Stalled:         stalled && !done,
