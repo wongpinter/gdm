@@ -45,9 +45,9 @@ func runOrganize(args []string, out io.Writer) error {
 }
 
 func printOrganizeUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: gdm organize <tv|movie> --input PATH --output PATH [--query TITLE] [--apply]")
-	fmt.Fprintln(w, "Preview is default. --apply copies matched media and refuses to overwrite existing files.")
-	fmt.Fprintln(w, "Movies need TMDB_API_KEY or TMDB_READ_ACCESS_TOKEN.")
-	fmt.Fprintln(w, "TV example: gdm organize tv --input ./downloads --output ./library --query 'The Simpsons'")
-	fmt.Fprintln(w, "Movie example: TMDB_API_KEY=... gdm organize movie --input ./downloads --output ./Movies")
+	_, _ = fmt.Fprintln(w, "Usage: gdm organize <tv|movie> --input PATH --output PATH [--query TITLE] [--apply]")
+	_, _ = fmt.Fprintln(w, "Preview is default. --apply copies matched media and refuses to overwrite existing files.")
+	_, _ = fmt.Fprintln(w, "Movies need TMDB_API_KEY or TMDB_READ_ACCESS_TOKEN.")
+	_, _ = fmt.Fprintln(w, "TV example: gdm organize tv --input ./downloads --output ./library --query 'The Simpsons'")
+	_, _ = fmt.Fprintln(w, "Movie example: TMDB_API_KEY=... gdm organize movie --input ./downloads --output ./Movies")
 }

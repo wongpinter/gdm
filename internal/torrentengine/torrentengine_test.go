@@ -138,7 +138,7 @@ func TestEndToEndDownload(t *testing.T) {
 	if err := mi.Write(f); err != nil {
 		t.Fatalf("writing .torrent file: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	leechDir := t.TempDir()
 	leechClient, err := torrent.NewClient(offlineConfig(leechDir))
@@ -146,7 +146,7 @@ func TestEndToEndDownload(t *testing.T) {
 		t.Fatalf("starting leech client: %v", err)
 	}
 	defer leechClient.Close()
-	eng := &Engine{client: leechClient}
+	eng := &Engine{client: leechClient, dataDir: leechDir}
 	metaDir := t.TempDir()
 	eng.SetMetainfoCache(metaDir)
 

@@ -58,7 +58,7 @@ func TestPlanMovieWithTMDbToken(t *testing.T) {
 		if got := r.URL.Query().Get("year"); got != "2016" {
 			t.Errorf("year = %q", got)
 		}
-		io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
+		_, _ = io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
 	}))
 	defer server.Close()
 
@@ -204,7 +204,7 @@ func TestMovieYearlessFilenameUsesFullTitle(t *testing.T) {
 		if got := r.URL.Query().Get("query"); got != "Arrival" {
 			t.Errorf("query = %q, want Arrival", got)
 		}
-		io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
+		_, _ = io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
 	}))
 	defer server.Close()
 	items, err := Plan(context.Background(), Options{Kind: Movie, Input: file, Output: filepath.Join(root, "movies"), TMDBURL: server.URL})
@@ -231,7 +231,7 @@ func TestMovieRejectsInvalidTMDbMetadata(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				fmt.Fprintf(w, `{"results":[{"title":%q,"release_date":%q}]}`, tc.title, tc.releaseDate)
+				_, _ = fmt.Fprintf(w, `{"results":[{"title":%q,"release_date":%q}]}`, tc.title, tc.releaseDate)
 			}))
 			defer server.Close()
 			items, err := Plan(context.Background(), Options{
@@ -263,7 +263,7 @@ func TestDiscoveryReportsUnreadableSubdirectory(t *testing.T) {
 	if err := os.Chmod(child, 0); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(child, 0o755)
+	defer func() { _ = os.Chmod(child, 0o755) }()
 	if _, err := os.ReadDir(child); err == nil {
 		t.Skip("current user can read mode-000 directory")
 	}
@@ -297,11 +297,11 @@ func TestMovieRequiresTMDbCredential(t *testing.T) {
 func tvmazeServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/search/shows":
-			io.WriteString(w, `[{"score":1,"show":{"id":42,"name":"The Simpsons"}}]`)
-		case r.URL.Path == "/shows/42/episodes":
-			io.WriteString(w, `[{"season":35,"number":3,"name":"McMansion and Wife"}]`)
+		switch r.URL.Path {
+		case "/search/shows":
+			_, _ = io.WriteString(w, `[{"score":1,"show":{"id":42,"name":"The Simpsons"}}]`)
+		case "/shows/42/episodes":
+			_, _ = io.WriteString(w, `[{"season":35,"number":3,"name":"McMansion and Wife"}]`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -312,6 +312,6 @@ func movieServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	t.Setenv("TMDB_READ_ACCESS_TOKEN", "test-token")
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
+		_, _ = io.WriteString(w, `{"results":[{"title":"Arrival","release_date":"2016-11-10"}]}`)
 	}))
 }

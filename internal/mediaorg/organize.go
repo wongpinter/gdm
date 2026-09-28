@@ -155,18 +155,18 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 	for _, item := range items {
 		if item.Err != nil {
 			failed++
-			fmt.Fprintf(out, "[FAILED] %s: %v\n", item.Source, item.Err)
+			_, _ = fmt.Fprintf(out, "[FAILED] %s: %v\n", item.Source, item.Err)
 			continue
 		}
 		if opts.Apply {
 			if err := copyNew(item.Source, item.Destination); err != nil {
 				failed++
-				fmt.Fprintf(out, "[FAILED] %s: %v\n", item.Source, err)
+				_, _ = fmt.Fprintf(out, "[FAILED] %s: %v\n", item.Source, err)
 				continue
 			}
-			fmt.Fprintf(out, "[COPIED] %s -> %s\n", item.Source, item.Destination)
+			_, _ = fmt.Fprintf(out, "[COPIED] %s -> %s\n", item.Source, item.Destination)
 		} else {
-			fmt.Fprintf(out, "[DRY-RUN] %s -> %s\n", item.Source, item.Destination)
+			_, _ = fmt.Fprintf(out, "[DRY-RUN] %s -> %s\n", item.Source, item.Destination)
 		}
 		completed++
 	}
@@ -174,9 +174,9 @@ func Run(ctx context.Context, opts Options, out io.Writer) error {
 		return fmt.Errorf("%d of %d files could not be organized", failed, len(items))
 	}
 	if opts.Apply {
-		fmt.Fprintf(out, "Copied %d file(s).\n", completed)
+		_, _ = fmt.Fprintf(out, "Copied %d file(s).\n", completed)
 	} else {
-		fmt.Fprintf(out, "Previewed %d file(s); pass --apply to copy.\n", completed)
+		_, _ = fmt.Fprintf(out, "Previewed %d file(s); pass --apply to copy.\n", completed)
 	}
 	return nil
 }
@@ -202,7 +202,11 @@ func discover(input, output string) ([]string, []Item, error) {
 			scanIssues = append(scanIssues, Item{Source: path, Err: fmt.Errorf("scanning path: %w", walkErr)})
 			return nil
 		}
-		if entry.IsDir() && path != input && (path == output || within(output, path)) {
+		// Never descend into the output root itself. Compare for
+		// equality only: when the output *contains* the input,
+		// `within(output, path)` is true for every directory on the
+		// walk, and every directory gets skipped — no files found.
+		if entry.IsDir() && path != input && path == output {
 			return filepath.SkipDir
 		}
 		if !entry.Type().IsRegular() || !videoExts[strings.ToLower(filepath.Ext(path))] {
@@ -341,7 +345,7 @@ func (o *organizer) moviePath(ctx context.Context, file, override string) (strin
 		if len(results.Results) == 0 {
 			return "", fmt.Errorf("TMDb found no movie matching %q", query)
 		}
-		found, ok = results.Results[0], true
+		found = results.Results[0]
 		if found.Title == "" || len(found.ReleaseDate) < 4 {
 			return "", fmt.Errorf("TMDb result for %q has incomplete title or release date", query)
 		}
@@ -377,7 +381,7 @@ func (o *organizer) getJSON(ctx context.Context, endpoint string, dst any, beare
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("HTTP %s", resp.Status)
@@ -436,7 +440,7 @@ func copyNew(source, destination string) error {
 	if err != nil {
 		return fmt.Errorf("opening source: %w", err)
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	info, err := in.Stat()
 	if err != nil {
 		return fmt.Errorf("reading source metadata: %w", err)
@@ -446,12 +450,12 @@ func copyNew(source, destination string) error {
 		return fmt.Errorf("creating destination without overwrite: %w", err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(destination)
+		_ = out.Close()
+		_ = os.Remove(destination)
 		return fmt.Errorf("copying file: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		os.Remove(destination)
+		_ = os.Remove(destination)
 		return fmt.Errorf("closing destination: %w", err)
 	}
 	return nil

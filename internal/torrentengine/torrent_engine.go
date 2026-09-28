@@ -170,11 +170,34 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 	t.AllowDataDownload()
 	t.DownloadAll()
 
+	// Repair unfinalized data before joining the event loop: when a
+	// file's final path is missing while its .part holds the full
+	// payload (promotion failed, or the process died between marking
+	// pieces complete and renaming), anacrolix treats piece state as
+	// authoritative and never rehashes — resume would claim
+	// "finished" with .part still on disk, or after a restart stall
+	// forever without peers. A local rehash lets a passing check
+	// promote .part to its final name; a failing one flips the pieces
+	// back to incomplete so the swarm path below re-downloads them.
+	if err := e.healUnfinalized(ctx, t); err != nil {
+		return err
+	}
+
 	err = e.streamStats(ctx, t, stats)
 
 	// Pause: stop requesting new pieces, but keep swarm connection
 	// and piece state. Resume will call AllowDataDownload again.
 	t.DisallowDataDownload()
+
+	// Trust, but verify: anacrolix logs promotion failures and still
+	// reports the torrent complete, so a nil streamStats doesn't
+	// guarantee the files are on disk. Fail here instead of handing
+	// the caller a "finished" download whose data never left .part.
+	if err == nil {
+		if missing := unfinalizedFiles(t, e.dataDir); len(missing) > 0 {
+			err = fmt.Errorf("torrent finished but files are not finalized on disk: %s", strings.Join(missing, ", "))
+		}
+	}
 
 	return err
 }
@@ -253,15 +276,15 @@ func (e *Engine) saveMetainfo(t *torrent.Torrent) {
 	tmpName := tmp.Name()
 	mi := t.Metainfo()
 	if err := mi.Write(tmp); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return
 	}
-	os.Rename(tmpName, filepath.Join(e.metaDir, ih+".torrent"))
+	_ = os.Rename(tmpName, filepath.Join(e.metaDir, ih+".torrent"))
 }
 
 // streamStats sends an initial TorrentStats snapshot and then streams
@@ -404,4 +427,50 @@ func (e *Engine) cachedMetainfo(uri string) string {
 		return ""
 	}
 	return path
+}
+
+// regularFile reports whether path exists as a regular file.
+func regularFile(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// unfinalizedFiles lists torrent files whose final path has no regular
+// file behind it — the .part was never promoted (or the file vanished).
+func unfinalizedFiles(t *torrent.Torrent, dataDir string) []string {
+	var missing []string
+	for _, f := range t.Files() {
+		if !regularFile(filepath.Join(dataDir, filepath.FromSlash(f.Path()))) {
+			missing = append(missing, f.Path())
+		}
+	}
+	return missing
+}
+
+// healUnfinalized rehashes files whose payload is complete on disk but
+// still sits under the .part name, letting a passing hash promote them.
+// It only triggers on anomalous states: .part holds exactly the file's
+// length, or the torrent claims complete while the file is missing.
+// A normal partial resume (shorter .part, file still being written)
+// skips to the swarm and pays nothing beyond one stat per file.
+func (e *Engine) healUnfinalized(ctx context.Context, t *torrent.Torrent) error {
+	for _, f := range t.Files() {
+		final := filepath.Join(e.dataDir, filepath.FromSlash(f.Path()))
+		if regularFile(final) {
+			continue
+		}
+		fullPart := false
+		if fi, err := os.Stat(final + ".part"); err == nil {
+			fullPart = fi.Size() == f.Length()
+		}
+		if !fullPart && !t.Complete().Bool() {
+			continue
+		}
+		for p := range f.Pieces() {
+			if err := p.VerifyDataContext(ctx); err != nil {
+				return fmt.Errorf("verifying %s: %w", f.Path(), err)
+			}
+		}
+	}
+	return nil
 }

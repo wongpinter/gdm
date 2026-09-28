@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -121,6 +122,17 @@ func New(eng Engine, st Store, downloadDir string, maxConns, maxActive int) (*Ma
 	for _, dl := range saved {
 		if dl.Status == domain.StatusDownloading || dl.Status == domain.StatusProbing {
 			dl.Status = domain.StatusPaused
+		}
+		// A torrent marked completed while its files never left .part
+		// isn't finished: anacrolix logs promotion failures and moves
+		// on, so the piece state lied. Demote to Paused so the user
+		// can resume and let the engine's repair pass rehash and
+		// promote them. Re-derived on every load, so it heals itself
+		// once the .part files are gone.
+		if dl.Status == domain.StatusCompleted && dl.EffectiveKind() == domain.KindTorrent &&
+			dl.Dest != "" && partDataRemains(dl.Dest) {
+			dl.Status = domain.StatusPaused
+			dl.Error = "files not finalized (.part remains); resume to repair"
 		}
 		m.entries[dl.ID] = &entry{dl: dl}
 		m.order = append(m.order, dl.ID)
@@ -355,7 +367,11 @@ func (m *Manager) Remove(id string, deleteFile bool) error {
 	if err := m.store.Delete(id); err != nil {
 		return err
 	}
-	if deleteFile && dest != "" {
+	// dest is expected to live inside downloadDir; the check is belt
+	// and braces for a state file written by an older or hostile build,
+	// because RemoveAll on an escaping path deletes user data outside
+	// the download directory.
+	if deleteFile && dest != "" && withinDir(m.downloadDir, dest) {
 		if kind == domain.KindTorrent {
 			_ = os.RemoveAll(dest)
 		} else {
@@ -549,6 +565,11 @@ func (m *Manager) runDownload(id string, ctx context.Context, runID uint64) {
 		e.mu.Unlock()
 	}
 
+	// Clamp persisted progress to the bytes that are actually on disk
+	// (and to what the transport can resume) before the engine writes
+	// at those offsets: a state file can outlive its destination.
+	e.reconcileProgress()
+
 	e.setStatus(domain.StatusDownloading)
 	m.persist(id)
 
@@ -667,7 +688,12 @@ func (m *Manager) applyTorrentStats(e *entry, st TorrentStats) {
 		e.dl.Filename = st.Name
 	}
 	if e.dl.Dest == "" && st.Name != "" {
-		e.dl.Dest = filepath.Join(m.downloadDir, st.Name)
+		// st.Name comes from untrusted torrent metadata (a magnet's dn
+		// parameter included): keep Dest inside downloadDir so Remove
+		// can never delete outside it.
+		if dest, ok := joinWithin(m.downloadDir, st.Name); ok {
+			e.dl.Dest = dest
+		}
 	}
 	if st.TotalSize > 0 {
 		e.dl.TotalSize = st.TotalSize
@@ -691,6 +717,12 @@ func (m *Manager) finish(id string, runID uint64, runErr error, ctx context.Cont
 	if e.runID != runID {
 		e.mu.Unlock()
 		return
+	}
+	// Trust, but verify: an HTTP run can return nil with bytes still
+	// missing (a short body, a stripped Range). Completing anyway hands
+	// the user a file with holes, so fail it here instead.
+	if runErr == nil && e.dl.Kind == domain.KindHTTP && e.dl.TotalSize > 0 && e.dl.BytesDownloaded() < e.dl.TotalSize {
+		runErr = fmt.Errorf("incomplete download: %d of %d bytes", e.dl.BytesDownloaded(), e.dl.TotalSize)
 	}
 	switch {
 	case runErr == nil:
@@ -780,12 +812,20 @@ func (e *entry) updateSpeed() {
 	e.lastSample = now
 }
 
-// splitSegments divides size bytes across connections. When size is
-// unknown or the server rejects ranges, it falls back to a single
-// unbounded segment (End = -1 means "read until EOF").
+// splitSegments divides size bytes across connections.
+//
+//   - size unknown → one unbounded segment (End = -1, "read until EOF");
+//     ranged resume still works when the server advertises ranges.
+//   - no range support → one bounded segment covering the whole file;
+//     it is refetched from offset zero on every run, because a server
+//     that cannot resume restarts its body at byte 0.
+//   - otherwise → connections bounded segments.
 func splitSegments(size int64, connections int, supportsRange bool) []domain.Segment {
-	if !supportsRange || size <= 0 {
+	if size <= 0 {
 		return []domain.Segment{{Index: 0, Start: 0, End: -1}}
+	}
+	if !supportsRange {
+		return []domain.Segment{{Index: 0, Start: 0, End: size - 1}}
 	}
 	if connections < 1 {
 		connections = 1
@@ -807,6 +847,74 @@ func splitSegments(size int64, connections int, supportsRange bool) []domain.Seg
 	return segments
 }
 
+// reconcileProgress trims persisted segment progress back to what is
+// actually on disk — and to what the transport can still resume —
+// before a run writes at those offsets. State outlives its destination
+// (manual delete, cleanup job, partial copy), and a server that no
+// longer advertises ranges restarts its body from byte 0; resuming past
+// either leaves a hole of zeros that still reports completion.
+// Caller must not hold e.mu. Returns true when anything changed.
+func (e *entry) reconcileProgress() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	changed := false
+	if !e.dl.SupportsRange && !e.dl.Finished() {
+		// No ranges → no resume: every byte is refetched from offset 0.
+		for i := range e.dl.Segments {
+			if e.dl.Segments[i].Downloaded != 0 {
+				e.dl.Segments[i].Downloaded = 0
+				changed = true
+			}
+		}
+	}
+
+	// Bytes a segment may still claim: at most the file's end, capped
+	// at its own range. A missing file yields size - 1, i.e. zero.
+	var size int64 = -1
+	if e.dl.Dest != "" {
+		if fi, err := os.Stat(e.dl.Dest); err == nil {
+			size = fi.Size()
+		}
+	}
+	for i := range e.dl.Segments {
+		s := &e.dl.Segments[i]
+		avail := size - s.Start
+		if s.Bounded() && avail > s.Size() {
+			avail = s.Size()
+		}
+		if avail < 0 {
+			avail = 0
+		}
+		if s.Downloaded > avail {
+			s.Downloaded = avail
+			changed = true
+		}
+	}
+	if changed {
+		e.dl.UpdatedAt = time.Now()
+	}
+	return changed
+}
+
+// joinWithin joins name to dir and reports whether the result stays
+// inside dir. name is untrusted (torrent metadata, state files).
+func joinWithin(dir, name string) (string, bool) {
+	dest := filepath.Join(dir, name)
+	return dest, withinDir(dir, dest)
+}
+
+// withinDir reports whether path resolves strictly inside dir.
+// dir itself counts as outside: Dest == downloadDir would delete the
+// whole download directory on Remove (e.g. a torrent named ".").
+func withinDir(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || rel == "." || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // reserveName appends " (n)" before the extension until it creates a
 // file under that name with O_CREATE|O_EXCL, atomically reserving it —
 // so a second download probing the same filename concurrently can't
@@ -814,7 +922,10 @@ func splitSegments(size int64, connections int, supportsRange bool) []domain.Seg
 // The empty placeholder file doubles as the download's destination;
 // engine.Run opens and writes into it.
 func reserveName(dir, name string) (string, error) {
-	if name == "" {
+	// The name can come from a Content-Disposition header, so strip any
+	// directory a server tried to smuggle in ("../evil", "/etc/x").
+	name = filepath.Base(filepath.Clean(name))
+	if name == "" || name == "." || name == ".." || name == string(filepath.Separator) {
 		name = "download"
 	}
 	ext := filepath.Ext(name)
@@ -829,9 +940,34 @@ func reserveName(dir, name string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reserving destination for %s: %w", name, err)
 		}
-		f.Close()
+		_ = f.Close()
 		return candidate, nil
 	}
+}
+
+// partDataRemains reports whether dest has leftover .part data: a
+// sibling dest+".part", or any .part under dest when it's a directory
+// (multi-file torrents promote parts inside the folder).
+func partDataRemains(dest string) bool {
+	if _, err := os.Stat(dest + ".part"); err == nil {
+		return true
+	}
+	fi, err := os.Stat(dest)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(dest, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".part") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 func newID() string {

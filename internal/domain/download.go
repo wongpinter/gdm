@@ -40,13 +40,21 @@ type Segment struct {
 }
 
 // Size returns the total byte length this segment is responsible for.
+// An unbounded segment (End < 0) has no known size and reports 0.
 func (s Segment) Size() int64 {
 	return s.End - s.Start + 1
 }
 
+// Bounded reports whether the segment's upper bound is known.
+func (s Segment) Bounded() bool { return s.End >= 0 }
+
 // Done reports whether this segment has fetched every byte in its range.
+// An unbounded segment (End < 0, "read until EOF") is never done here:
+// only the transport observes EOF. Its zero Size would otherwise make
+// Done() true before a single byte was fetched, marking unknown-size
+// downloads complete with an empty file.
 func (s Segment) Done() bool {
-	return s.Downloaded >= s.Size()
+	return s.Bounded() && s.Downloaded >= s.Size()
 }
 
 // NextOffset is the absolute file offset to resume this segment from.

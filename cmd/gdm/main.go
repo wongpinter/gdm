@@ -73,7 +73,7 @@ func run() error {
 		te.SetMetainfoCache(filepath.Join(filepath.Dir(*stateDir), "torrents"))
 		te.SetAllowPublicTrackers(*publicTrackers)
 		mgr.SetTorrentEngine(te)
-		defer te.Close()
+		defer func() { _ = te.Close() }()
 	}
 
 	var watchIDs []string
@@ -166,6 +166,11 @@ func runHeadless(mgr *manager.Manager, watchIDs []string, interval time.Duration
 		interval = 2 * time.Second
 	}
 	ids := watchedUnfinished(mgr, watchIDs)
+	// Nothing resumes a paused download in headless mode; say so
+	// instead of spinning on progress lines until someone kills us.
+	if st := stalledIDs(mgr, ids); len(st) > 0 {
+		return fmt.Errorf("not running: %s (headless cannot resume a paused download)", strings.Join(st, "; "))
+	}
 	if len(ids) == 0 {
 		if len(watchIDs) == 0 {
 			fmt.Fprintln(os.Stderr, "gdm: nothing queued (pass a URL, magnet URI, or .torrent path)")
@@ -184,6 +189,9 @@ func runHeadless(mgr *manager.Manager, watchIDs []string, interval time.Duration
 		if allFinished(mgr, ids) {
 			return headlessResult(mgr, ids)
 		}
+		if st := stalledIDs(mgr, ids); len(st) > 0 {
+			return fmt.Errorf("not running: %s (headless cannot resume a paused download)", strings.Join(st, "; "))
+		}
 	}
 	return nil
 }
@@ -201,6 +209,10 @@ func runHeadlessSingle(mgr *manager.Manager, id string, interval time.Duration) 
 		if allFinished(mgr, []string{id}) {
 			fmt.Println()
 			return headlessResult(mgr, []string{id})
+		}
+		if st := stalledIDs(mgr, []string{id}); len(st) > 0 {
+			fmt.Println()
+			return fmt.Errorf("not running: %s (headless cannot resume a paused download)", strings.Join(st, "; "))
 		}
 	}
 	return nil
@@ -230,6 +242,26 @@ func watchedUnfinished(mgr *manager.Manager, watchIDs []string) []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// stalledIDs lists watched downloads that are neither finished nor
+// active: nothing will ever move them again, so a headless wait would
+// spin on progress lines forever (a paused download restored from
+// state is the common case).
+func stalledIDs(mgr *manager.Manager, ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		s, ok := mgr.Get(id)
+		if !ok || s.Download == nil || s.Download.Finished() || s.Download.Active() {
+			continue
+		}
+		name := s.Download.Filename
+		if name == "" {
+			name = shortURL(s.Download.URL)
+		}
+		out = append(out, name+" ("+string(s.Download.Status)+")")
+	}
+	return out
 }
 
 func allFinished(mgr *manager.Manager, ids []string) bool {
@@ -385,8 +417,12 @@ func headlessResult(mgr *manager.Manager, ids []string) error {
 }
 
 // boolFlags are flags that take no value — everything else starting
-// with - consumes the next arg as its value during reordering.
-var boolFlags = map[string]bool{"headless": true, "h": true, "help": true}
+// with - consumes the next arg as its value during reordering. Every
+// bool flag declared by the CLI must be listed, or reorderArgs swallows
+// the argument after it (a URL, or the next flag's name) as its value.
+var boolFlags = map[string]bool{
+	"headless": true, "h": true, "help": true, "public-trackers": true,
+}
 
 // reorderArgs moves flags before positional args so flag order is
 // free: `./gdm -dir /x 'magnet:..'` and `./gdm 'magnet:..' -dir /x`
