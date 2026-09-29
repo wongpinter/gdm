@@ -194,9 +194,7 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 	// guarantee the files are on disk. Fail here instead of handing
 	// the caller a "finished" download whose data never left .part.
 	if err == nil {
-		if missing := unfinalizedFiles(t, e.dataDir); len(missing) > 0 {
-			err = fmt.Errorf("torrent finished but files are not finalized on disk: %s", strings.Join(missing, ", "))
-		}
+		err = verifyCompletedFiles(ctx, t, e.dataDir)
 	}
 
 	return err
@@ -435,16 +433,26 @@ func regularFile(path string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// unfinalizedFiles lists torrent files whose final path has no regular
-// file behind it — the .part was never promoted (or the file vanished).
-func unfinalizedFiles(t *torrent.Torrent, dataDir string) []string {
-	var missing []string
+// verifyCompletedFiles performs a final disk verification after the torrent
+// reports complete. Completion succeeds only when every final file exists,
+// has the expected size, and every piece hash passes locally.
+func verifyCompletedFiles(ctx context.Context, t *torrent.Torrent, dataDir string) error {
 	for _, f := range t.Files() {
-		if !regularFile(filepath.Join(dataDir, filepath.FromSlash(f.Path()))) {
-			missing = append(missing, f.Path())
+		path := filepath.Join(dataDir, filepath.FromSlash(f.Path()))
+		fi, err := os.Stat(path)
+		if err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("torrent finished but files are not finalized on disk: %s", f.Path())
+		}
+		if fi.Size() != f.Length() {
+			return fmt.Errorf("torrent finished but file %s has size %d, expected %d", f.Path(), fi.Size(), f.Length())
+		}
+		for p := range f.Pieces() {
+			if err := p.VerifyDataContext(ctx); err != nil {
+				return fmt.Errorf("verifying completed file %s: %w", f.Path(), err)
+			}
 		}
 	}
-	return missing
+	return nil
 }
 
 // healUnfinalized rehashes files whose payload is complete on disk but
