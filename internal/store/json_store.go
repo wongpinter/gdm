@@ -37,6 +37,12 @@ func New(dir string) (*JSONStore, error) {
 
 // Save serializes one download to its state file, replacing it atomically.
 func (s *JSONStore) Save(d *domain.Download) error {
+	if d == nil {
+		return fmt.Errorf("encoding nil download")
+	}
+	if err := validID(d.ID); err != nil {
+		return fmt.Errorf("saving download: %w", err)
+	}
 	data, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding download %s: %w", d.ID, err)
@@ -75,6 +81,9 @@ func (s *JSONStore) Save(d *domain.Download) error {
 
 // Load reads one download by id.
 func (s *JSONStore) Load(id string) (*domain.Download, error) {
+	if err := validID(id); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(s.path(id))
 	if err != nil {
 		return nil, err
@@ -99,6 +108,9 @@ func (s *JSONStore) LoadAll() ([]*domain.Download, error) {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
+		if err := validID(id); err != nil {
+			continue
+		}
 		d, err := s.Load(id)
 		if err != nil {
 			continue
@@ -111,6 +123,9 @@ func (s *JSONStore) LoadAll() ([]*domain.Download, error) {
 // Delete removes one download's state file. It also tombstones the id,
 // so a Save that was already in flight cannot bring the file back.
 func (s *JSONStore) Delete(id string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dead[id] = true
@@ -129,6 +144,13 @@ func (s *JSONStore) Ping(context.Context) error {
 	}
 	if !fi.IsDir() {
 		return fmt.Errorf("state path %s is not a directory", s.dir)
+	}
+	return nil
+}
+
+func validID(id string) error {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\\`) {
+		return fmt.Errorf("invalid download id %q", id)
 	}
 	return nil
 }

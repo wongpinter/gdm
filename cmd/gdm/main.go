@@ -77,6 +77,7 @@ func run() error {
 	}
 
 	var watchIDs []string
+	var addErrors []string
 	for _, arg := range flag.Args() {
 		if id, ok := reuseExisting(mgr, arg); ok {
 			watchIDs = append(watchIDs, id)
@@ -90,7 +91,9 @@ func run() error {
 			added, addErr = mgr.Add(arg, 0)
 		}
 		if addErr != nil {
-			fmt.Fprintf(os.Stderr, "gdm: adding %s: %v\n", arg, addErr)
+			msg := fmt.Sprintf("adding %s: %v", arg, addErr)
+			fmt.Fprintln(os.Stderr, "gdm:", msg)
+			addErrors = append(addErrors, msg)
 			continue
 		}
 		watchIDs = append(watchIDs, added.ID)
@@ -108,8 +111,13 @@ func run() error {
 	}
 
 	mgr.Shutdown(10 * time.Second)
-
-	return runErr
+	if runErr != nil {
+		return runErr
+	}
+	if len(addErrors) > 0 {
+		return fmt.Errorf("%d download(s) could not be queued: %s", len(addErrors), strings.Join(addErrors, "; "))
+	}
+	return nil
 }
 
 // hasTTY reports whether /dev/tty can be opened. Colab, CI runners,

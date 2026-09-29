@@ -83,6 +83,25 @@ func TestSaveAfterDeleteDoesNotResurrectFile(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsPathTraversalIDs(t *testing.T) {
+	st, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := []string{"", ".", "..", "../escape", `nested\\id`}
+	for _, id := range bad {
+		if err := st.Save(&domain.Download{ID: id}); err == nil {
+			t.Errorf("Save(%q) accepted invalid id", id)
+		}
+		if _, err := st.Load(id); err == nil {
+			t.Errorf("Load(%q) accepted invalid id", id)
+		}
+		if err := st.Delete(id); err == nil {
+			t.Errorf("Delete(%q) accepted invalid id", id)
+		}
+	}
+}
+
 func TestLoadAllSkipsTempLeftovers(t *testing.T) {
 	dir := t.TempDir()
 	st, err := New(dir)
