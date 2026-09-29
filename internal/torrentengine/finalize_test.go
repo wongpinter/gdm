@@ -28,17 +28,7 @@ func setupSeed(t *testing.T, size int) (string, metainfo.Hash, *torrent.Client) 
 	t.Helper()
 	seedDir := t.TempDir()
 	_, mi, infoHash := buildTorrent(t, seedDir, "seed.bin", size)
-	seed, err := torrent.NewClient(offlineConfig(seedDir))
-	if err != nil {
-		t.Fatalf("seed client: %v", err)
-	}
-	t.Cleanup(func() { _ = seed.Close() })
-	st, err := seed.AddTorrent(&mi)
-	if err != nil {
-		t.Fatalf("seeding: %v", err)
-	}
-	<-st.GotInfo()
-	st.DownloadAll()
+	seed := newSeeder(t, seedDir, mi)
 
 	torrentPath := filepath.Join(t.TempDir(), "seed.torrent")
 	f, err := os.Create(torrentPath)
@@ -50,6 +40,25 @@ func setupSeed(t *testing.T, size int) (string, metainfo.Hash, *torrent.Client) 
 	}
 	_ = f.Close()
 	return torrentPath, infoHash, seed
+}
+
+// newSeeder serves mi from dir on a fresh client. Tests that need a
+// second connection use a new seeder because the first connection goes
+// stale once the download run finishes.
+func newSeeder(t *testing.T, dir string, mi metainfo.MetaInfo) *torrent.Client {
+	t.Helper()
+	seed, err := torrent.NewClient(offlineConfig(dir))
+	if err != nil {
+		t.Fatalf("seed client: %v", err)
+	}
+	t.Cleanup(func() { _ = seed.Close() })
+	st, err := seed.AddTorrent(&mi)
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	<-st.GotInfo()
+	st.DownloadAll()
+	return seed
 }
 
 // newLeech builds an Engine over dataDir with its own client — a stand-in
@@ -76,14 +85,26 @@ func startAndWait(t *testing.T, eng *Engine, seed *torrent.Client, infoHash meta
 	errCh := make(chan error, 1)
 	go func() { errCh <- eng.Start(ctx, "probe", dl, stats) }()
 	if wirePeer {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if lt, ok := eng.client.Torrent(infoHash); ok {
-				lt.AddClientPeer(seed)
-				break
+		// Keep re-adding the peer until Start returns: the repair path
+		// pauses data downloads, which can drop the connection right after
+		// the first attempt, and these tests have no trackers to
+		// rediscover it.
+		stopPeerKeeper := make(chan struct{})
+		defer close(stopPeerKeeper)
+		go func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPeerKeeper:
+					return
+				case <-ticker.C:
+					if lt, ok := eng.client.Torrent(infoHash); ok {
+						lt.AddClientPeer(seed)
+					}
+				}
 			}
-			time.Sleep(10 * time.Millisecond)
-		}
+		}()
 	}
 	var res startResult
 	for {
@@ -186,6 +207,73 @@ func TestStartRepairsUnfinalizedDataInProcess(t *testing.T) {
 		t.Fatalf("in-process resume: %v", res.err)
 	}
 	assertFinalized(t, final)
+}
+
+// TestStartRepairsCorruptFileAfterRehash pins the corruption bug:
+// piece state said complete while the bytes on disk were wrong, and
+// VerifyDataContext returns nil on a hash failure (it only flips the
+// piece back to incomplete). Completion must not be reported until the
+// rehash passes and the swarm has refilled the bad piece.
+func TestStartRepairsCorruptFileAfterRehash(t *testing.T) {
+	seedDir := t.TempDir()
+	_, mi, infoHash := buildTorrent(t, seedDir, "seed.bin", 300_000)
+	seed := newSeeder(t, seedDir, mi)
+
+	torrentPath := filepath.Join(t.TempDir(), "seed.torrent")
+	f, err := os.Create(torrentPath)
+	if err != nil {
+		t.Fatalf("create .torrent: %v", err)
+	}
+	if err := mi.Write(f); err != nil {
+		t.Fatalf("write .torrent: %v", err)
+	}
+	_ = f.Close()
+
+	leechDir := t.TempDir()
+	final := filepath.Join(leechDir, "seed.bin")
+
+	eng := newLeech(t, leechDir)
+	res := startAndWait(t, eng, seed, infoHash, torrentPath, true, 30*time.Second)
+	if res.err != nil || !res.doneSeen {
+		t.Fatalf("initial download: done=%v err=%v", res.doneSeen, res.err)
+	}
+
+	// Corrupt one byte behind the client's back. Piece state still says
+	// complete, so only a forced rehash can notice. anacrolix sets
+	// completed files read-only, so re-enable write first.
+	good, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatalf("reading payload: %v", err)
+	}
+	if err := os.Chmod(final, 0o644); err != nil {
+		t.Fatalf("chmod payload: %v", err)
+	}
+	corrupt := append([]byte(nil), good...)
+	corrupt[len(corrupt)/2] ^= 0xff
+	if err := os.WriteFile(final, corrupt, 0o644); err != nil {
+		t.Fatalf("corrupting payload: %v", err)
+	}
+
+	// The peer connection from the completed run is stale, so serve the
+	// repair from a fresh seeder with a new listen address. Resume
+	// in-process: the engine must rehash, find the bad piece, and refill
+	// it before reporting done.
+	seed2 := newSeeder(t, seedDir, mi)
+	res = startAndWait(t, eng, seed2, infoHash, torrentPath, true, 30*time.Second)
+	if res.err != nil {
+		t.Fatalf("repair run: %v", res.err)
+	}
+	if !res.doneSeen {
+		t.Fatal("no done snapshot after repair")
+	}
+
+	got, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatalf("reading repaired payload: %v", err)
+	}
+	if string(got) != string(good) {
+		t.Fatal("payload still corrupt after repair run")
+	}
 }
 
 // TestStartFailsWhenPromotionIsBlocked: with a directory squatting on

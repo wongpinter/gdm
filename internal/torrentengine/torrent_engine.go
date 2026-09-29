@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -208,7 +209,7 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 				return err
 			}
 			return nil
-		} else if !strings.Contains(err.Error(), "verifying completed torrent data") {
+		} else if !errors.Is(err, errHashMismatch) {
 			return err
 		}
 		// Hash mismatch marks bad pieces incomplete. Re-enable requests so
@@ -452,6 +453,11 @@ func regularFile(path string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
+// errHashMismatch marks data that a forced rehash found incomplete: at
+// least one piece failed its SHA-1 check and was flipped back to
+// incomplete. It is retryable — the swarm can replace the bad pieces.
+var errHashMismatch = errors.New("torrent data failed hash verification")
+
 // waitForFinalizedFiles gives anacrolix time to promote completed .part
 // files before declaring failure. Promotion can lag piece completion.
 func waitForFinalizedFiles(ctx context.Context, t *torrent.Torrent, dataDir string) error {
@@ -463,6 +469,13 @@ func waitForFinalizedFiles(ctx context.Context, t *torrent.Torrent, dataDir stri
 		if err := completedFilesError(t, dataDir); err == nil {
 			if err := t.VerifyDataContext(ctx); err != nil {
 				return fmt.Errorf("verifying completed torrent data: %w", err)
+			}
+			// VerifyDataContext returns nil even when piece hashes
+			// mismatch — it only flips those pieces back to incomplete.
+			// Check the post-rehash state so a corrupt file is never
+			// reported as a finished download.
+			if t.BytesCompleted() < t.Length() {
+				return errHashMismatch
 			}
 			return nil
 		} else if t.Complete().Bool() || (t.Length() > 0 && t.BytesCompleted() >= t.Length()) {
@@ -502,14 +515,23 @@ func validateFiles(dataDir string, files []*torrent.File, manifestPath string, v
 		defer f.Close()
 		s := bufio.NewScanner(f)
 		for s.Scan() {
-			fields := strings.Fields(s.Text())
-			if len(fields) < 2 || len(fields[0]) != sha256.Size*2 {
+			line := s.Text()
+			if len(line) < sha256.Size*2+1 || line[sha256.Size*2] != ' ' {
 				continue
 			}
-			path := fields[len(fields)-1]
-			h, err := os.Open(filepath.Join(dataDir, path))
+			if _, err := hex.DecodeString(line[:sha256.Size*2]); err != nil {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimLeft(line[sha256.Size*2:], " "), "*")
+			if name == "" {
+				continue
+			}
+			if !filepath.IsLocal(name) {
+				return fmt.Errorf("checksum manifest path escapes download dir: %s", name)
+			}
+			h, err := os.Open(filepath.Join(dataDir, name))
 			if err != nil {
-				return fmt.Errorf("checksum %s: %w", path, err)
+				return fmt.Errorf("checksum %s: %w", name, err)
 			}
 			sum := sha256.New()
 			_, err = io.Copy(sum, h)
@@ -517,8 +539,8 @@ func validateFiles(dataDir string, files []*torrent.File, manifestPath string, v
 			if err != nil {
 				return err
 			}
-			if !strings.EqualFold(hex.EncodeToString(sum.Sum(nil)), fields[0]) {
-				return fmt.Errorf("SHA-256 mismatch: %s", path)
+			if !strings.EqualFold(hex.EncodeToString(sum.Sum(nil)), line[:sha256.Size*2]) {
+				return fmt.Errorf("SHA-256 mismatch: %s", name)
 			}
 		}
 		if err := s.Err(); err != nil {
@@ -527,15 +549,24 @@ func validateFiles(dataDir string, files []*torrent.File, manifestPath string, v
 	}
 	if validateAudio {
 		for _, f := range files {
-			if strings.EqualFold(filepath.Ext(f.Path()), ".m4b") {
-				cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-show_format", filepath.Join(dataDir, filepath.FromSlash(f.Path())))
-				if out, err := cmd.CombinedOutput(); err != nil {
-					return fmt.Errorf("ffprobe %s: %w: %s", f.Path(), err, strings.TrimSpace(string(out)))
-				}
+			if !audioExtensions[strings.ToLower(filepath.Ext(f.Path()))] {
+				continue
+			}
+			cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-show_format",
+				filepath.Join(dataDir, filepath.FromSlash(f.Path())))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("ffprobe %s: %w: %s", f.Path(), err, strings.TrimSpace(string(out)))
 			}
 		}
 	}
 	return nil
+}
+
+// audioExtensions are the media extensions --validate-audio probes:
+// containers ffprobe parses quickly and that corruption would break.
+var audioExtensions = map[string]bool{
+	".m4b": true, ".m4a": true, ".mp3": true, ".flac": true,
+	".ogg": true, ".opus": true, ".aac": true, ".wav": true,
 }
 
 // healUnfinalized rehashes files whose payload is complete on disk but
