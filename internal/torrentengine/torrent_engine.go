@@ -185,20 +185,22 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 		return err
 	}
 
-	err = e.streamStats(ctx, t, stats)
-
-	// Pause: stop requesting new pieces, but keep swarm connection
-	// and piece state. Resume will call AllowDataDownload again.
-	t.DisallowDataDownload()
-
-	// Trust, but verify: anacrolix logs promotion failures and still
-	// reports the torrent complete, so a nil streamStats doesn't
-	// guarantee the files are on disk. Fail here instead of handing
-	// the caller a "finished" download whose data never left .part.
-	if err == nil {
-		err = waitForFinalizedFiles(ctx, t, e.dataDir)
+	for attempts := 0; attempts < 3; attempts++ {
+		err = e.streamStats(ctx, t, stats)
+		t.DisallowDataDownload()
+		if err != nil {
+			return err
+		}
+		if err = waitForFinalizedFiles(ctx, t, e.dataDir); err == nil {
+			return nil
+		} else if !strings.Contains(err.Error(), "verifying completed torrent data") {
+			return err
+		}
+		// Hash mismatch marks bad pieces incomplete. Re-enable requests so
+		// the swarm repairs them instead of reporting corrupt files done.
+		t.AllowDataDownload()
+		t.DownloadAll()
 	}
-
 	return err
 }
 
@@ -444,12 +446,8 @@ func waitForFinalizedFiles(ctx context.Context, t *torrent.Torrent, dataDir stri
 	defer tick.Stop()
 	for {
 		if err := completedFilesError(t, dataDir); err == nil {
-			for _, f := range t.Files() {
-				for p := range f.Pieces() {
-					if err := p.VerifyDataContext(ctx); err != nil {
-						return fmt.Errorf("verifying completed file %s: %w", f.Path(), err)
-					}
-				}
+			if err := t.VerifyDataContext(ctx); err != nil {
+				return fmt.Errorf("verifying completed torrent data: %w", err)
 			}
 			return nil
 		} else if t.Complete().Bool() || (t.Length() > 0 && t.BytesCompleted() >= t.Length()) {
