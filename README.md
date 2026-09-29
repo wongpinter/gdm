@@ -1,168 +1,153 @@
 # gdm
 
-GDM (Go Download Manager) is a small download manager in Go: multi-connection
-segmented HTTP downloads, BitTorrent downloads, pause/resume, crash-safe
-persistence, and a terminal dashboard — no GUI, no daemon, just one binary.
+GDM (Go Download Manager) is a single-binary Go download manager for terminal and headless environments. It supports segmented HTTP downloads, BitTorrent magnets and `.torrent` files, pause/resume, crash-safe state, and media organization.
 
-## Features
+## Requirements
 
-- **Segmented HTTP downloads** — splits a file across N connections
-  (`Range` requests) and writes each segment straight into its slot in
-  the destination file via `WriteAt`, so there's no separate merge step.
-  When the total size is known, the destination is pre-sized in one
-  `Truncate` before the first segment writes.
-- **BitTorrent downloads** — magnet URIs or local `.torrent` files,
-  backed by `anacrolix/torrent`. Detected automatically (a `magnet:`
-  prefix or `.torrent` extension) wherever you add a download — CLI
-  args or the in-dashboard "add" box.
-- **Pause / resume** — a queued download can be paused before it
-  starts: it stays paused instead of launching when a slot frees up.
-  For HTTP, pausing cancels the in-flight request
-  context and persists exactly how many bytes each segment has,
-  resuming re-issues `Range: bytes=<offset>-<end>` from there. For
-  torrents, pausing drops the swarm connection but leaves whatever
-  pieces have already landed on disk; resuming re-adds the torrent and
-  the library re-verifies what's already there.
-- **Crash recovery** — every download's state lives in its own JSON file
-  (atomic write via temp file + rename). On restart, anything that was
-  `downloading` when the process died comes back as `paused`, never
-  silently resumed behind your back.
-- **Fallback for non-range HTTP servers** — if a server doesn't
-  advertise `Accept-Ranges: bytes`, the download drops to a single
-  connection instead of failing outright.
-- **TUI dashboard** — live progress bars, speed, ETA, peer counts for
-  torrents, add/pause/resume/remove, all from the terminal.
+- Go 1.24.4 or newer
+- Writable download and state directories
+- Network access for HTTP downloads and torrent metadata/peers
+- TMDb credentials only for movie organization
+- TV organization uses TVMaze
 
-## Usage
+## Build and run
 
 ```sh
 go build -o gdm ./cmd/gdm
 
-./gdm                                     # open the empty dashboard
-./gdm https://example.com/big-file.iso    # queue an HTTP download
-./gdm 'magnet:?xt=urn:btih:...'           # queue a torrent by magnet URI
-./gdm ./linux-distro.torrent              # queue a torrent from a local file
+./gdm                                      # terminal dashboard
+./gdm https://example.com/file.iso         # queue HTTP download
+./gdm 'magnet:?xt=urn:btih:...'             # queue torrent
+./gdm ./linux-distro.torrent               # queue local torrent
+./gdm --headless                            # process unfinished queue
 ```
 
-Flags:
+Flags can appear before or after URLs:
 
-| Flag           | Default            | Meaning                                   |
-|----------------|---------------------|--------------------------------------------|
-| `-dir`         | `~/Downloads`        | where finished files are written           |
-| `-state`       | `~/.gdm/state`       | where per-download JSON state is kept      |
-| `-connections` | `4`                  | default segments per HTTP download         |
-| `-max-active`  | `3`                  | how many downloads run at once             |
-| `-public-trackers` | `false`          | announce magnets to public fallback trackers while fetching metadata; reveals info hash |
+| Flag | Default | Purpose |
+|---|---|---|
+| `-dir` | `~/Downloads` | Finished-file directory |
+| `-state` | `~/.gdm/state` | Per-download JSON state |
+| `-connections` | `4` | HTTP connections per download |
+| `-max-active` | `3` | Concurrent active downloads |
+| `-interval` | `2s` | Headless progress refresh |
+| `-public-trackers` | `false` | Add fallback trackers before magnet metadata; reveals info hash |
+| `--headless` | `false` | Run without TUI and return non-zero on failure |
 
-State moved from `~/.idm/state` to `~/.gdm/state` when the project
-was renamed; an existing `~/.idm/state` is migrated there automatically
-on first run (the legacy path is kept if the move fails).
+Headless examples:
 
-Keys inside the dashboard: `a` add a URL, magnet link, or `.torrent`
-path · `p` pause · `r` resume · `x` remove (and delete the file) ·
-`↑/↓` select · `q` quit.
+```sh
+./gdm --headless -dir /data/downloads 'magnet:?xt=urn:btih:...'
+./gdm --headless -interval 500ms
+```
 
-If the torrent client can't start (e.g. a container with no IPv6 stack
-at all — it retries once with IPv6 disabled before giving up), torrent
-support is simply skipped and HTTP downloads keep working; a message
-is printed to stderr explaining why.
+No TTY automatically selects headless mode. A completed torrent is not accepted from piece state alone: gdm checks every final file, expected size, and piece hash before returning success. Full `.part` data is locally rehashed and promoted when possible; corrupt or incomplete data returns to the normal swarm path.
+
+## Dashboard keys
+
+`a` add URL, magnet, or `.torrent` path · `p` pause · `r` resume · `x` remove and delete downloaded data · `↑/↓` select · `q` quit.
+
+## Media organizer
+
+Organizer commands default to dry-run. Add `--apply` only after reviewing planned paths. Existing files and collisions are not overwritten.
+
+```sh
+# Preview TV organization
+./gdm organize tv --input /downloads --output /library/TV --query "The Simpsons"
+
+# Apply movie organization
+TMDB_API_KEY=YOUR_KEY ./gdm organize movie \
+  --input "/downloads/Arrival (2016).mkv" \
+  --output /library/Movies --apply
+```
+
+TV matching reads `SxxEyy` and can use TVMaze. Movie matching uses TMDb and requires `TMDB_API_KEY` or `TMDB_READ_ACCESS_TOKEN`. Supported media extensions: `mkv`, `mp4`, `m4v`, `avi`, `mov`, `mpeg`, `mpg`, `ts`, `webm`, `wmv`.
+
+## State and recovery
+
+State is stored as one JSON file per download under `~/.gdm/state`. Writes use a temporary file and atomic rename. Interrupted active downloads load as `paused`; gdm does not silently spend bandwidth after restart.
+
+The old `~/.idm/state` directory migrates to `~/.gdm/state` once. Override with `-state` when using a custom location. Torrent metainfo cache lives beside state at `~/.gdm/torrents` by default.
+
+Torrent recovery rules:
+
+- Final files are authoritative only after size and piece-hash verification.
+- A completed torrent with leftover `.part` data loads as `paused`.
+- Resuming a full `.part` file hashes local data first and avoids re-download.
+- A promotion failure is surfaced as an error, not reported as completed.
+- Zero-byte files are invalid for non-empty torrent files and are rechecked by size/hash.
+
+If a queue entry says completed but disk data is missing, stop gdm, verify `-dir` matches the original destination, rebuild the binary, and restart:
+
+```sh
+go build -o gdm ./cmd/gdm
+./gdm --headless
+```
 
 ## Architecture
 
-Hexagonal, with the domain at the center and everything else an
-interchangeable adapter:
+The repository uses ports-and-adapters boundaries:
 
-```
-internal/domain      — Download / Segment entities, no I/O. Kind
-                        ("http"/"torrent") picks which run path a
-                        download takes.
-internal/manager      — application service: queue, concurrency, pause/
-                        resume, progress aggregation. Declares the
-                        ports it needs (Store, Engine, TorrentEngine)
-                        as consumer-defined interfaces in ports.go.
-internal/engine       — outbound adapter: net/http implementation of
-                        the Engine port (probing + ranged downloads)
-internal/torrentengine — outbound adapter: anacrolix/torrent
-                        implementation of the TorrentEngine port
-internal/store        — outbound adapter: JSON-file implementation of
-                        the Store port
-internal/tui          — inbound adapter: bubbletea dashboard that
-                        drives the manager
-cmd/gdm               — composition root: wires adapters into the
-                        manager and starts the TUI
+```text
+cmd/gdm                 composition root, CLI, headless mode
+internal/domain         Download and Segment entities; no I/O
+internal/manager        queue, lifecycle, concurrency, progress, ports
+internal/engine         segmented HTTP adapter
+internal/torrentengine  anacrolix/torrent adapter and disk verification
+internal/store          atomic JSON persistence adapter
+internal/mediaorg       TV/movie discovery and safe copy planning
+internal/tui             Bubble Tea dashboard adapter
+third_party             narrow module stubs for legacy transitive tooling
+skills                  maintainer workflow notes
 ```
 
-`internal/manager` never imports `internal/engine`, `internal/torrentengine`,
-or `internal/store` — it only knows about the interfaces it declared for
-itself. Swapping the JSON store for SQLite, or adding a third download
-kind entirely, means writing a new adapter, not touching the manager.
+`internal/manager` depends on interfaces declared in `internal/manager/ports.go`, not concrete transport or persistence adapters. Keep new integrations behind those ports. Keep filesystem and network validation at adapter boundaries. Do not bypass manager lifecycle methods by mutating stored JSON manually while gdm is running.
 
-HTTP and torrent downloads share the domain model despite very different
-engines: a torrent is represented as one pseudo-`Segment` spanning the
-whole transfer (`{Start:0, End:TotalSize-1, Downloaded:BytesCompleted}`),
-so `Download.BytesDownloaded()`/`Progress()` work unchanged for both —
-the manager runs a `runTorrentDownload` loop parallel to `runDownload`,
-consuming periodic `TorrentStats` snapshots from `TorrentEngine.Start` instead of aggregating
-per-chunk `ProgressEvent`s, but everything downstream (persistence, the
-TUI, pause/resume semantics) is the same code path.
+Concurrency rules:
 
-### Concurrency model
+- Manager owns lifecycle transitions and limits active downloads with a semaphore.
+- Each download worker owns its mutable download state.
+- `Manager.List` and `Manager.Get` return copies for readers such as TUI.
+- HTTP segments write disjoint ranges with `WriteAt`.
+- Store writes and deletes are serialized and reject unsafe IDs.
 
-Each download runs in its own goroutine (bounded by `-max-active` via a
-semaphore). Within a download, each unfinished segment gets its own
-goroutine performing a ranged GET and writing into the shared file at
-its own offset — safe without a lock because segments never overlap.
-Progress flows back as a stream of `{segment, bytesWritten}` deltas on
-a channel; the owning goroutine is the only writer of that download's
-mutable state, so reads from the TUI (via `Manager.List`/`Get`) take a
-per-download lock and hand back a deep copy.
+## Development
 
-### Tests
-
-`internal/manager/manager_test.go` runs the real HTTP engine and store
-against a local `httptest.Server` (using `http.ServeContent`, so real
-`Range` handling) — a full download with checksum verification, a
-pause-mid-transfer-then-resume round trip, and a simulated process
-restart that confirms an interrupted download comes back `paused`
-rather than resuming itself.
-
-`internal/torrentengine/torrentengine_test.go` runs a real, fully
-offline BitTorrent transfer: two in-process `torrent.Client`s (a seeder
-and a leecher) peered directly via `AddClientPeer`, no DHT or trackers
-involved, checksummed end to end.
+Run focused checks during changes:
 
 ```sh
-go test ./... -race
+gofmt -w ./cmd ./internal
+go test ./...
+go test -race ./...
+go vet ./...
+golangci-lint run ./...
 ```
 
-### A note on `go.mod`
+Run one package while iterating:
 
-`anacrolix/torrent` pulls in a long tail of dependencies that live at
-vanity import domains (`golang.org/x/*`, `gopkg.in/*`,
-`go.opentelemetry.io/*`, and a few more) rather than directly on
-GitHub. The `replace` block in `go.mod` redirects each of those to its
-official GitHub mirror at a matching commit or tag. A handful of
-entries point at a small local stub under `third_party/` instead —
-these are old test/lint tooling (`gopkg.in/errgo.v2`, `golang.org/x/lint`,
-`honnef.co/go/tools`, `cloud.google.com/go`, `gopkg.in/alecthomas/kingpin.v2`)
-pulled in only because some very old transitive dependency predates
-Go's module graph pruning; nothing in this project's actual build
-imports them, so an empty stub package satisfies the module graph
-without needing the real (unused) code. If your environment has normal
-access to the Go module proxy, none of this is necessary — the
-`replace` block and `third_party/` directory can both be deleted, and
-`go mod tidy` will resolve everything the standard way.
+```sh
+go test ./internal/torrentengine -run 'TestStart|TestEndToEnd' -count=1 -v
+go test ./internal/manager -run 'Test.*' -count=1 -v
+```
+
+Tests use local `httptest` servers and offline in-process torrent seeders. They do not require public trackers. Avoid tests that depend on real external media APIs or network timing.
+
+Before submitting changes:
+
+1. Keep changes inside the relevant package boundary.
+2. Add a focused regression test for non-trivial behavior.
+3. Run formatting, unit tests, race tests, vet, and lint.
+4. Check `git diff` for generated binaries, credentials, state files, and accidental path changes.
 
 ## Known limitations
 
-- No bandwidth throttling or recurring time-window scheduling; one-time
-  "download later" scheduling is available through the manager API.
-- No browser integration / clipboard URL monitoring.
-- HTTP segment count is fixed per download at creation time — it
-  doesn't dynamically add connections to a slow segment.
-- Paused torrents retain their swarm and piece state in the shared client;
-  resume reuses that retained torrent. Explicit removal drops the torrent.
-- No custom DHT or tracker configuration; public torrents get built-in
-  fallback trackers after metadata. `-public-trackers` enables public
-  tracker announces before magnet metadata arrives and reveals the info hash.
-  No seeding-after-complete toggle.
+- No bandwidth throttling or recurring schedule.
+- No browser integration or clipboard monitoring.
+- HTTP segment count is fixed when a download is created.
+- Paused torrents retain state in the current client; explicit removal drops the torrent.
+- No seeding-after-complete toggle.
+- Public fallback trackers are opt-in before metadata and disclose the torrent info hash.
+
+## License
+
+See [LICENSE](LICENSE).

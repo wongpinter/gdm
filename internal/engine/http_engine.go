@@ -67,8 +67,8 @@ func (e *HTTPEngine) probeWith(ctx context.Context, method, rawURL string) (mana
 	if err != nil {
 		return manager.ProbeResult{}, fmt.Errorf("probing %s: %w", rawURL, err)
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, readBufSize))
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, readBufSize))
 
 	if resp.StatusCode >= 400 {
 		return manager.ProbeResult{}, fmt.Errorf("probing %s: server returned %s", rawURL, resp.Status)
@@ -117,7 +117,7 @@ func (e *HTTPEngine) Run(ctx context.Context, d *domain.Download, events chan<- 
 	if err != nil {
 		return fmt.Errorf("opening %s: %w", d.Dest, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	if d.TotalSize > 0 {
 		// Pre-size while no segment is writing yet: the filesystem
@@ -130,6 +130,11 @@ func (e *HTTPEngine) Run(ctx context.Context, d *domain.Download, events chan<- 
 
 	errCh := make(chan error, len(d.Segments))
 	pending := 0
+	// First segment error cancels the run: sibling connections stop
+	// instead of continuing to fill a destination whose run already
+	// failed (the loop below still drains every goroutine).
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	for i := range d.Segments {
 		seg := d.Segments[i]
 		if seg.Done() {
@@ -145,6 +150,7 @@ func (e *HTTPEngine) Run(ctx context.Context, d *domain.Download, events chan<- 
 	for range pending {
 		if err := <-errCh; err != nil && firstErr == nil {
 			firstErr = err
+			cancel()
 		}
 	}
 	return firstErr
@@ -167,13 +173,26 @@ func (e *HTTPEngine) runSegment(ctx context.Context, d *domain.Download, seg dom
 	if err != nil {
 		return fmt.Errorf("segment %d: %w", seg.Index, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+	offset := seg.NextOffset()
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		if start, ok := contentRangeStart(resp.Header.Get("Content-Range")); ok && start != offset {
+			return fmt.Errorf("segment %d: server resumed at byte %d, want %d", seg.Index, start, offset)
+		}
+	case http.StatusOK:
+		// A 200 body starts at byte 0 of the resource, which only fits
+		// when this run also starts at byte 0 (one segment, offset 0).
+		// Anything else writes the head of the file over its middle —
+		// this is what a proxy that strips the Range header looks like.
+		if offset != 0 || len(d.Segments) != 1 {
+			return fmt.Errorf("segment %d: server ignored the Range request (200); refusing to write at offset %d", seg.Index, offset)
+		}
+	default:
 		return fmt.Errorf("segment %d: server returned %s", seg.Index, resp.Status)
 	}
 
-	offset := seg.NextOffset()
 	buf := make([]byte, readBufSize)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -193,9 +212,34 @@ func (e *HTTPEngine) runSegment(ctx context.Context, d *domain.Download, seg dom
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
+				// EOF is success only for a segment that reads until
+				// EOF; a bounded segment ending early means bytes
+				// nobody would ever come back for.
+				if seg.Bounded() && offset < seg.End+1 {
+					return fmt.Errorf("segment %d: server closed the connection after %d of %d bytes", seg.Index, offset-seg.Start, seg.Size())
+				}
 				return nil
 			}
 			return fmt.Errorf("segment %d: %w", seg.Index, rerr)
 		}
 	}
+}
+
+// contentRangeStart parses the start offset of a Content-Range header
+// ("bytes 100-199/2000"); ok is false when the header is absent or has
+// no parseable start.
+func contentRangeStart(v string) (int64, bool) {
+	if !strings.HasPrefix(v, "bytes ") {
+		return 0, false
+	}
+	rest := v[len("bytes "):]
+	i := strings.IndexByte(rest, '-')
+	if i < 0 {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(rest[:i], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return start, true
 }

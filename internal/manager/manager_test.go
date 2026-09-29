@@ -49,6 +49,10 @@ func newTestManager(t *testing.T, eng manager.Engine) *manager.Manager {
 	if err != nil {
 		t.Fatalf("manager.New: %v", err)
 	}
+	// Shut the manager down before t.TempDir is removed: a worker
+	// persisting state after the cleanup race leaves "directory not
+	// empty" teardown errors.
+	t.Cleanup(func() { mgr.Shutdown(5 * time.Second) })
 	return mgr
 }
 

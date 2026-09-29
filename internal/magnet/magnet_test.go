@@ -72,10 +72,10 @@ func TestInfoHashOfTorrentFile(t *testing.T) {
 		t.Fatalf("create file: %v", err)
 	}
 	if err := mi.Write(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatalf("write torrent: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	got, err := InfoHashOf(path)
 	if err != nil {

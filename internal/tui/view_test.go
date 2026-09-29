@@ -45,6 +45,17 @@ func TestSplitDashboardOnlyWide(t *testing.T) {
 	}
 }
 
+func TestTorrentRowShowsActiveFoundAndPendingPeers(t *testing.T) {
+	d := &domain.Download{Kind: domain.KindTorrent, Status: domain.StatusDownloading, TotalSize: 100, Segments: []domain.Segment{{Start: 0, End: 99}}}
+	m := Model{width: 140, height: 24, rows: []manager.Snapshot{{
+		Download: d, Peers: 2, TorrentFound: 17, TorrentPending: 3,
+	}}}
+	got := m.renderRow(0, m.rows[0])
+	if !strings.Contains(got, "2/17+3") {
+		t.Fatalf("torrent peer counts missing from row: %q", got)
+	}
+}
+
 func TestNarrowColumnsFitTerminal(t *testing.T) {
 	for width := 1; width < 76; width++ {
 		columns := (Model{width: width}).narrowColumns()
