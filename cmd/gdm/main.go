@@ -401,14 +401,18 @@ func shortURL(u string) string {
 }
 
 func headlessResult(mgr *manager.Manager, ids []string) error {
-	var failed []string
+	var failed, saved []string
 	for _, id := range ids {
 		s, ok := mgr.Get(id)
 		if !ok || s.Download == nil {
 			continue
 		}
 		switch s.Download.Status {
-		case "failed", "canceled":
+		case domain.StatusCompleted:
+			if s.Download.Dest != "" {
+				saved = append(saved, s.Download.Dest)
+			}
+		case domain.StatusFailed, domain.StatusCanceled:
 			name := s.Download.Filename
 			if name == "" {
 				name = s.Download.URL
@@ -421,9 +425,15 @@ func headlessResult(mgr *manager.Manager, ids []string) error {
 		}
 	}
 	if len(failed) > 0 {
+		for _, p := range saved {
+			fmt.Println("gdm: saved", p)
+		}
 		return fmt.Errorf("%d download(s) failed: %s", len(failed), strings.Join(failed, "; "))
 	}
 	fmt.Println("gdm: all downloads finished")
+	for _, p := range saved {
+		fmt.Println("gdm: saved", p)
+	}
 	return nil
 }
 

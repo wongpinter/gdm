@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/wongpinter/gdm/internal/domain"
 	"github.com/wongpinter/gdm/internal/manager"
 )
 
@@ -28,9 +29,12 @@ const (
 type Model struct {
 	mgr *manager.Manager
 
-	rows   []manager.Snapshot
-	cursor int
-	mode   mode
+	rows []manager.Snapshot
+	// seenStatus tracks the last status shown per download so the TUI can
+	// announce where a download landed exactly once, when it completes.
+	seenStatus map[string]domain.Status
+	cursor     int
+	mode       mode
 
 	input         textinput.Model
 	scheduleInput textinput.Model

@@ -5,6 +5,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/wongpinter/gdm/internal/domain"
 )
 
 // isTorrentSource reports whether s names a torrent (a magnet URI or a
@@ -23,6 +25,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickCmd(), m.refresh())
 
 	case refreshMsg:
+		if m.seenStatus == nil {
+			// First listing: adopt current state without announcing
+			// pre-existing completed downloads.
+			m.seenStatus = make(map[string]domain.Status, len(msg))
+			for _, r := range msg {
+				if r.Download != nil {
+					m.seenStatus[r.Download.ID] = r.Download.Status
+				}
+			}
+		} else {
+			// Snapshot.Download aliases live state, so compare against the
+			// statuses remembered from the previous refresh instead.
+			// Dest is a file for HTTP downloads, a directory for torrents.
+			for _, r := range msg {
+				d := r.Download
+				if d == nil {
+					continue
+				}
+				if d.Status == domain.StatusCompleted && d.Dest != "" && m.seenStatus[d.ID] != domain.StatusCompleted {
+					m.statusMsg = "saved " + d.Dest
+				}
+				m.seenStatus[d.ID] = d.Status
+			}
+		}
 		m.rows = msg
 		if m.cursor >= len(m.rows) {
 			m.cursor = max(len(m.rows)-1, 0)
