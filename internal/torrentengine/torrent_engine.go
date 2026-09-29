@@ -17,6 +17,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 
 	"github.com/wongpinter/gdm/internal/domain"
 	"github.com/wongpinter/gdm/internal/magnet"
@@ -95,6 +96,7 @@ var _ manager.TorrentEngine = (*Engine)(nil)
 func New(dataDir string) (*Engine, error) {
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = dataDir
+	cfg.DefaultStorage = storage.NewFileWithCompletion(dataDir, storage.NewMapPieceCompletion())
 	cfg.Seed = true // keep pieces available for resume verification
 	// Keep anacrolix's balanced connection, peer-watermark, hashing,
 	// and unverified-byte defaults. Earlier overrides raised fan-out and
