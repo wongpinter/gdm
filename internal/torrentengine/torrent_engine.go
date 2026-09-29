@@ -332,7 +332,7 @@ func (e *Engine) streamStats(ctx context.Context, t *torrent.Torrent, stats chan
 // sendStats emits one TorrentStats snapshot. Returns false if the
 // context is done (caller should return ctx.Err()).
 func sendStats(ctx context.Context, t *torrent.Torrent, stats chan<- manager.TorrentStats, stage string, stalled bool) bool {
-	done := t.Complete().Bool()
+	done := t.Complete().Bool() || (t.Length() > 0 && t.BytesCompleted() >= t.Length())
 	torrentStats := t.Stats()
 	st := manager.TorrentStats{
 		Name:            t.Name(),
@@ -452,7 +452,7 @@ func waitForFinalizedFiles(ctx context.Context, t *torrent.Torrent, dataDir stri
 				}
 			}
 			return nil
-		} else if t.Complete().Bool() {
+		} else if t.Complete().Bool() || (t.Length() > 0 && t.BytesCompleted() >= t.Length()) {
 			select {
 			case <-tick.C:
 			case <-deadline.C:
