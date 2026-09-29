@@ -194,7 +194,7 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 	// guarantee the files are on disk. Fail here instead of handing
 	// the caller a "finished" download whose data never left .part.
 	if err == nil {
-		err = verifyCompletedFiles(ctx, t, e.dataDir)
+		err = waitForFinalizedFiles(ctx, t, e.dataDir)
 	}
 
 	return err
@@ -433,10 +433,38 @@ func regularFile(path string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// verifyCompletedFiles performs a final disk verification after the torrent
-// reports complete. Completion succeeds only when every final file exists,
-// has the expected size, and every piece hash passes locally.
-func verifyCompletedFiles(ctx context.Context, t *torrent.Torrent, dataDir string) error {
+// waitForFinalizedFiles gives anacrolix time to promote completed .part
+// files before declaring failure. Promotion can lag piece completion.
+func waitForFinalizedFiles(ctx context.Context, t *torrent.Torrent, dataDir string) error {
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := completedFilesError(t, dataDir); err == nil {
+			for _, f := range t.Files() {
+				for p := range f.Pieces() {
+					if err := p.VerifyDataContext(ctx); err != nil {
+						return fmt.Errorf("verifying completed file %s: %w", f.Path(), err)
+					}
+				}
+			}
+			return nil
+		} else if t.Complete().Bool() {
+			select {
+			case <-tick.C:
+			case <-deadline.C:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		} else {
+			return err
+		}
+	}
+}
+
+func completedFilesError(t *torrent.Torrent, dataDir string) error {
 	for _, f := range t.Files() {
 		path := filepath.Join(dataDir, filepath.FromSlash(f.Path()))
 		fi, err := os.Stat(path)
@@ -445,11 +473,6 @@ func verifyCompletedFiles(ctx context.Context, t *torrent.Torrent, dataDir strin
 		}
 		if fi.Size() != f.Length() {
 			return fmt.Errorf("torrent finished but file %s has size %d, expected %d", f.Path(), fi.Size(), f.Length())
-		}
-		for p := range f.Pieces() {
-			if err := p.VerifyDataContext(ctx); err != nil {
-				return fmt.Errorf("verifying completed file %s: %w", f.Path(), err)
-			}
 		}
 	}
 	return nil
