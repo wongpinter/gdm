@@ -7,9 +7,14 @@
 package torrentengine
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -54,6 +59,8 @@ type Engine struct {
 	// without it, fallback trackers are only added after metadata proves
 	// the torrent isn't private (BEP 27).
 	allowPublicTrackers bool
+	manifestPath        string
+	validateAudio       bool
 }
 
 const (
@@ -80,6 +87,11 @@ func (e *Engine) SetMetainfoCache(dir string) {
 // See allowPublicTrackers docs for the privacy tradeoff.
 func (e *Engine) SetAllowPublicTrackers(allow bool) {
 	e.allowPublicTrackers = allow
+}
+
+func (e *Engine) SetValidation(manifestPath string, validateAudio bool) {
+	e.manifestPath = manifestPath
+	e.validateAudio = validateAudio
 }
 
 // shouldAddFallback reports whether fallback trackers may be added for
@@ -192,6 +204,9 @@ func (e *Engine) Start(ctx context.Context, id string, d *domain.Download, stats
 			return err
 		}
 		if err = waitForFinalizedFiles(ctx, t, e.dataDir); err == nil {
+			if err := validateFiles(e.dataDir, t.Files(), e.manifestPath, e.validateAudio); err != nil {
+				return err
+			}
 			return nil
 		} else if !strings.Contains(err.Error(), "verifying completed torrent data") {
 			return err
@@ -473,6 +488,51 @@ func completedFilesError(t *torrent.Torrent, dataDir string) error {
 		}
 		if fi.Size() != f.Length() {
 			return fmt.Errorf("torrent finished but file %s has size %d, expected %d", f.Path(), fi.Size(), f.Length())
+		}
+	}
+	return nil
+}
+
+func validateFiles(dataDir string, files []*torrent.File, manifestPath string, validateAudio bool) error {
+	if manifestPath != "" {
+		f, err := os.Open(manifestPath)
+		if err != nil {
+			return fmt.Errorf("opening checksum manifest: %w", err)
+		}
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			fields := strings.Fields(s.Text())
+			if len(fields) < 2 || len(fields[0]) != sha256.Size*2 {
+				continue
+			}
+			path := fields[len(fields)-1]
+			h, err := os.Open(filepath.Join(dataDir, path))
+			if err != nil {
+				return fmt.Errorf("checksum %s: %w", path, err)
+			}
+			sum := sha256.New()
+			_, err = io.Copy(sum, h)
+			_ = h.Close()
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(hex.EncodeToString(sum.Sum(nil)), fields[0]) {
+				return fmt.Errorf("SHA-256 mismatch: %s", path)
+			}
+		}
+		if err := s.Err(); err != nil {
+			return fmt.Errorf("reading checksum manifest: %w", err)
+		}
+	}
+	if validateAudio {
+		for _, f := range files {
+			if strings.EqualFold(filepath.Ext(f.Path()), ".m4b") {
+				cmd := exec.Command("ffprobe", "-v", "error", "-show_streams", "-show_format", filepath.Join(dataDir, filepath.FromSlash(f.Path())))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return fmt.Errorf("ffprobe %s: %w: %s", f.Path(), err, strings.TrimSpace(string(out)))
+				}
+			}
 		}
 	}
 	return nil

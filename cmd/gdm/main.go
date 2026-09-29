@@ -46,6 +46,8 @@ func run() error {
 	headless := flag.Bool("headless", false, "run without TUI: print progress to stdout and wait until queued downloads finish (for Colab / CI / no-TTY)")
 	interval := flag.Duration("interval", 2*time.Second, "headless progress refresh interval (e.g. 500ms for smoother bars)")
 	publicTrackers := flag.Bool("public-trackers", false, "announce unknown info hashes to public fallback trackers during metadata fetch (rescues magnets with dead trackers; off by default for privacy)")
+	checksumManifest := flag.String("sha256-manifest", "", "sha256sum-format manifest for completed torrent files")
+	validateAudio := flag.Bool("validate-audio", false, "validate completed .m4b files with ffprobe")
 	// Flags may come before or after download URLs — Go's flag package
 	// stops at the first positional, so without this `./gdm 'magnet:..'`
 	// `-dir /x` would silently queue -dir, /x, ... as download URLs.
@@ -72,6 +74,7 @@ func run() error {
 	} else {
 		te.SetMetainfoCache(filepath.Join(filepath.Dir(*stateDir), "torrents"))
 		te.SetAllowPublicTrackers(*publicTrackers)
+		te.SetValidation(*checksumManifest, *validateAudio)
 		mgr.SetTorrentEngine(te)
 		defer func() { _ = te.Close() }()
 	}
